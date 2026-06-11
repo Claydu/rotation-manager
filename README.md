@@ -20,15 +20,24 @@ Everything auto-saves on the phone. If the app is closed, the phone locks,
 or the browser reloads, the game picks up exactly where it was — including
 the running clock, because all times are computed from timestamps.
 
+## Privacy
+
+Player names are never stored in this repository or the published app.
+The app only knows players as ids (p1–p8); real names are typed into the
+Setup tab and saved in the phone's local browser storage only.
+
 ## Development
 
 ```
 npm install
 npm run dev      # local dev server
-npm run build    # produces dist/index.html — a single self-contained file
+npm run build    # produces docs/index.html — a single self-contained file
 ```
 
-The build is one standalone HTML file. Share it however you like (email,
-AirDrop, host it anywhere) — it needs no server, no account, no internet.
-On a phone, open it in the browser and "Add to Home Screen" for an app-like
-experience.
+The build is one standalone HTML file served by GitHub Pages from `docs/`:
+
+**https://claydu.github.io/rotation-manager/**
+
+To ship a change: `npm run build`, commit, push to `master` — Pages
+redeploys automatically. On a phone, open the URL in the browser and
+"Add to Home Screen" for an app-like experience.
