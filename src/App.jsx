@@ -6,18 +6,19 @@ import { useState, useEffect, useRef } from "react";
 const PLAYERS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"];
 const defaultName = p => `Player ${PLAYERS.indexOf(p) + 1}`;
 
-const DEFAULT_ROTATIONS = [
-  { id: 1, onCourt: ["p1", "p2", "p3", "p4"] },
-  { id: 2, onCourt: ["p1", "p2", "p6", "p7"] },
-  { id: 3, onCourt: ["p5", "p2", "p3", "p6"] },
-  { id: 4, onCourt: ["p5", "p3", "p4", "p8"] },
-  { id: 5, onCourt: ["p1", "p4", "p7", "p8"] },
-  { id: 6, onCourt: ["p5", "p6", "p7", "p8"] },
-];
+// ── Round-robin day format ───────────────────────────────────────
+// 4× 8-minute games (plus a final if they make it). Within each game,
+// sub 2 girls every 2 minutes: 4 rotations of 4. Pairs ladder — each
+// pair plays two consecutive rotations, so every girl gets a continuous
+// 4-minute block per game (the "wrap" pair splits first/last rotation,
+// and which pair wraps rotates each game).
+const ROT_MS        = 2 * 60 * 1000;
+const ROTS_PER_GAME = 4;
+const GAME_MS       = ROT_MS * ROTS_PER_GAME;
+const PLANNED_GAMES = 4;
 
-const KEY_LINEUP = "u8_lineup_v4";
-const KEY_GAME   = "u8_game_v4";
-const KEY_NAMES  = "u8_names_v1";
+const KEY_TOURNEY = "u8_tourney_v1";
+const KEY_NAMES   = "u8_names_v1";
 
 // Storage: localStorage first (survives app/phone restarts), with an
 // in-memory fallback so the app never crashes if storage is blocked.
@@ -54,8 +55,44 @@ function buildSequence(rotations, allPlayers) {
   });
 }
 
+// Build a game's rotations as a pairs ladder: pairs P0..P3, rotation i
+// puts P(i) + P(i+1) on court, so every sub is exactly 2 girls and every
+// pair plays 2 consecutive rotations. Pairs are formed least-day-minutes
+// first (so with 7 girls, or after an injury, the girls who are behind
+// get the extra slots), and the roster is offset per game so a different
+// pair takes the split first/last "wrap" stint each game.
+function generateRotations(cumTimes, players, gameIndex) {
+  if (players.length === 0) return Array.from({ length: ROTS_PER_GAME }, (_, i) => ({ id: i + 1, onCourt: [] }));
+  const offset  = (gameIndex * 2) % players.length;
+  const rotated = players.map((_, i) => players[(i + offset) % players.length]);
+  const sorted  = [...rotated].sort((a, b) => (cumTimes[a] || 0) - (cumTimes[b] || 0));
+
+  const pairs = [];
+  for (let i = 0; i < sorted.length && pairs.length < 4; i += 2)
+    pairs.push(sorted.slice(i, i + 2));
+
+  const rots = [];
+  for (let i = 0; i < ROTS_PER_GAME; i++) {
+    const n = pairs.length;
+    const onCourt = [...new Set([...pairs[i % n], ...pairs[(i + 1) % n]])];
+    for (const p of sorted) {           // fill short rotations, least minutes first
+      if (onCourt.length >= 4) break;
+      if (!onCourt.includes(p)) onCourt.push(p);
+    }
+    rots.push({ id: i + 1, onCourt: onCourt.slice(0, 4) });
+  }
+  return rots;
+}
+
+function gameLabel(index) {
+  return index < PLANNED_GAMES ? `Game ${index + 1}` : index === PLANNED_GAMES ? "Final" : `Game ${index + 1}`;
+}
+function makeGame(index, rotations, unavailable) {
+  return { id: `g${index + 1}-${index}`, label: gameLabel(index), rotations, log: [], unavailable };
+}
+
 // ── Game clock model ─────────────────────────────────────────────
-// The game is a log of timestamped events:
+// Each game is a log of timestamped events:
 //   {type:'start', ts, rotIndex} {type:'sub', ts, rotIndex}
 //   {type:'pause', ts} {type:'resume', ts} {type:'end', ts}
 // All state (running/paused/ended, current rotation, court times) is
@@ -105,22 +142,18 @@ const COLORS = ["#f97316","#22d3ee","#a78bfa","#34d399","#fb7185","#fbbf24","#60
 function playerColor(p) { return COLORS[PLAYERS.indexOf(p) % COLORS.length]; }
 
 export default function App() {
-  // Lineup state
-  const [rotations,  setRotations]  = useState(DEFAULT_ROTATIONS);
-  const [names,      setNames]      = useState({});
-  const [absent,     setAbsent]     = useState([]);
-  const [injured,    setInjured]    = useState([]);
-  const [saveStatus, setSaveStatus] = useState(null);
-  const [hasSaved,   setHasSaved]   = useState(false);
-  const [loaded,     setLoaded]     = useState(false);
-
-  // Game state — single source of truth is the event log
-  const [gameLog, setGameLog] = useState([]);
+  // Tournament state — a list of games; the last one is the live game.
+  const [games,   setGames]   = useState(() => [makeGame(0, generateRotations({}, PLAYERS, 0), [])]);
+  const [names,   setNames]   = useState({});
+  const [absent,  setAbsent]  = useState([]);
+  const [injured, setInjured] = useState([]);
+  const [loaded,  setLoaded]  = useState(false);
 
   // UI
   const [view,      setView]      = useState("game");
+  const [timeScope, setTimeScope] = useState("day");   // 'game' | 'day'
   const [swapModal, setSwapModal] = useState(null);
-  const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(null); // null | 'game' | 'day'
   const [now,       setNow]       = useState(Date.now());
   const [dragInfo,  setDragInfo]  = useState(null); // {rotIdx, player} while dragging
   const wakeLockRef = useRef(null);
@@ -130,46 +163,63 @@ export default function App() {
   const name          = p => (names[p] || "").trim() || defaultName(p);
   const unavailable   = [...absent, ...injured];
   const activePlayers = PLAYERS.filter(p => !unavailable.includes(p));
-  const effectiveRots = applyAvailability(rotations, unavailable);
-  const sequence      = buildSequence(effectiveRots, activePlayers);
-  const game          = analyzeGame(gameLog, sequence, PLAYERS, now);
+  const curIdx        = games.length - 1;
+  const curGame       = games[curIdx];
+
+  // Analyze every game. Past games use the availability snapshot from
+  // when they were played, so marking a girl away later never rewrites
+  // the minutes she already earned.
+  const analyses = games.map((g, i) => {
+    const unav = i === curIdx ? unavailable : (g.unavailable || []);
+    const act  = PLAYERS.filter(p => !unav.includes(p));
+    const seq  = buildSequence(applyAvailability(g.rotations, unav), act);
+    return { ...analyzeGame(g.log, seq, PLAYERS, now), seq };
+  });
+  const game          = analyses[curIdx];
+  const sequence      = game.seq;
+  const effectiveRots = applyAvailability(curGame.rotations, unavailable);
   const { status }    = game;            // idle | running | paused | ended
   const currentRot    = game.rotIndex;
   const rot           = sequence[currentRot];
-  const courtTimes    = game.times;
-  const TARGET        = 5 * 60 * 1000;
-  const timerPct      = Math.min(game.sinceSub / TARGET, 1);
-  const overdue       = status === "running" && game.sinceSub > TARGET;
-  const gameStarted   = gameLog.length > 0;
+  const timerPct      = Math.min(game.sinceSub / ROT_MS, 1);
+  const overdue       = status === "running" && game.sinceSub > ROT_MS;
+  const gameStarted   = curGame.log.length > 0;
+  const gameElapsed   = game.segments.reduce((s, seg) => s + seg.dur, 0);
+
+  const dayTimes = {};
+  PLAYERS.forEach(p => { dayTimes[p] = analyses.reduce((s, a) => s + (a.times[p] || 0), 0); });
+  const daySegments = analyses.reduce((s, a) => s + a.segments.length, 0);
 
   // ── Load everything on mount ──────────────────────────────────
   useEffect(() => {
-    const lineup = retrieve(KEY_LINEUP);
-    if (lineup?.rotations) { setRotations(lineup.rotations); setHasSaved(true); }
-
-    const savedNames = retrieve(KEY_NAMES);
-    if (savedNames) setNames(savedNames);
-
-    const saved = retrieve(KEY_GAME);
-    if (saved) {
-      if (saved.gameLog) setGameLog(saved.gameLog);
+    const saved = retrieve(KEY_TOURNEY);
+    if (saved?.games?.length) {
+      setGames(saved.games);
       if (saved.absent)  setAbsent(saved.absent);
       if (saved.injured) setInjured(saved.injured);
     }
+    const savedNames = retrieve(KEY_NAMES);
+    if (savedNames) setNames(savedNames);
     setLoaded(true);
   }, []);
 
-  // ── Auto-save game state on every change ─────────────────────
+  // ── Auto-save everything on every change ──────────────────────
   useEffect(() => {
     if (!loaded) return;
-    persist(KEY_GAME, { gameLog, absent, injured });
-  }, [loaded, gameLog, absent, injured]);
+    persist(KEY_TOURNEY, { games, absent, injured });
+  }, [loaded, games, absent, injured]);
 
-  // ── Auto-save player names ────────────────────────────────────
   useEffect(() => {
     if (!loaded) return;
     persist(KEY_NAMES, names);
   }, [loaded, names]);
+
+  // Keep the live game's availability snapshot in sync
+  useEffect(() => {
+    if (!loaded) return;
+    const unav = [...absent, ...injured];
+    setGames(prev => prev.map((g, i) => i === prev.length - 1 ? { ...g, unavailable: unav } : g));
+  }, [loaded, absent, injured]);
 
   // ── Timer tick (only while clock is running) ──────────────────
   useEffect(() => {
@@ -205,47 +255,62 @@ export default function App() {
     };
   }, [status]);
 
-  // ── Lineup save / reset (manual) ──────────────────────────────
-  function saveLineup() {
-    try {
-      persist(KEY_LINEUP, { rotations });
-      setSaveStatus("saved");
-      setHasSaved(true);
-    } catch (e) {
-      setSaveStatus("error");
-    }
-    setTimeout(() => setSaveStatus(null), 2500);
+  // ── Mutate the live game ──────────────────────────────────────
+  function updateCurGame(fn) {
+    setGames(prev => prev.map((g, i) => i === prev.length - 1 ? fn(g) : g));
   }
-  function resetLineup() {
-    setRotations(DEFAULT_ROTATIONS);
-    forget(KEY_LINEUP);
-    setHasSaved(false);
+  function setCurRotations(updater) {
+    updateCurGame(g => ({ ...g, rotations: typeof updater === "function" ? updater(g.rotations) : updater }));
+  }
+  function addEvent(ev) {
+    updateCurGame(g => ({ ...g, log: [...g.log, { ...ev, ts: Date.now() }] }));
   }
 
   // ── Game controls ─────────────────────────────────────────────
-  function addEvent(ev) { setGameLog(prev => [...prev, { ...ev, ts: Date.now() }]); }
-
-  function startGame()  { setGameLog([{ type: "start", ts: Date.now(), rotIndex: 0 }]); }
+  function startGame()  { updateCurGame(g => ({ ...g, log: [{ type: "start", ts: Date.now(), rotIndex: 0 }] })); }
   function pauseGame()  { addEvent({ type: "pause" }); }
   function resumeGame() { addEvent({ type: "resume" }); }
   function endGame()    { addEvent({ type: "end" }); }
+  function undoEnd() {
+    updateCurGame(g => g.log[g.log.length - 1]?.type === "end" ? { ...g, log: g.log.slice(0, -1) } : g);
+  }
   function doSub() {
     if (currentRot >= sequence.length - 1) return;
     const evs = [];
     if (status === "paused") evs.push({ type: "resume", ts: Date.now() });
     evs.push({ type: "sub", ts: Date.now(), rotIndex: currentRot + 1 });
-    setGameLog(prev => [...prev, ...evs]);
+    updateCurGame(g => ({ ...g, log: [...g.log, ...evs] }));
   }
   function undoSub() {
     // Remove everything back to (and including) the most recent 'sub' event
-    const idx = gameLog.map(e => e.type).lastIndexOf("sub");
+    const idx = curGame.log.map(e => e.type).lastIndexOf("sub");
     if (idx <= 0) return;
-    setGameLog(gameLog.slice(0, idx));
+    updateCurGame(g => ({ ...g, log: g.log.slice(0, idx) }));
+  }
+
+  // ── Tournament controls ───────────────────────────────────────
+  function startNextGame() {
+    setGames(prev => [...prev, makeGame(prev.length,
+      generateRotations(dayTimes, activePlayers, prev.length), unavailable)]);
+    setView("game");
+  }
+  function backToPrevGame() {
+    // Only if the new game hasn't started — reopens the previous game
+    if (curGame.log.length > 0 || games.length < 2) return;
+    setGames(prev => prev.slice(0, -1));
+  }
+  function autoBalance() {
+    if (gameStarted) return;
+    setCurRotations(generateRotations(dayTimes, activePlayers, curIdx));
   }
   function resetGame() {
-    setGameLog([]);
-    setConfirmReset(false);
-    forget(KEY_GAME);
+    updateCurGame(g => ({ ...g, log: [] }));
+    setConfirmReset(null);
+  }
+  function resetDay() {
+    setGames([makeGame(0, generateRotations({}, activePlayers, 0), unavailable)]);
+    setConfirmReset(null);
+    forget(KEY_TOURNEY);
   }
 
   // ── Availability ──────────────────────────────────────────────
@@ -282,7 +347,7 @@ export default function App() {
       const r = c.getBoundingClientRect();
       if (e.clientY > r.bottom || (e.clientY >= r.top && e.clientX > r.left + r.width / 2)) idx++;
     }
-    setRotations(prev => prev.map((r, i) => {
+    setCurRotations(prev => prev.map((r, i) => {
       if (i !== rotIdx) return r;
       const cur = r.onCourt.indexOf(player);
       if (cur === -1 || cur === idx) return r;
@@ -308,7 +373,7 @@ export default function App() {
   function doSwap(newPlayer) {
     if (!swapModal) return;
     const { rotIdx, slotPlayer } = swapModal;
-    setRotations(prev => prev.map((r, i) => {
+    setCurRotations(prev => prev.map((r, i) => {
       if (i !== rotIdx) return r;
       if (slotPlayer === null) return { ...r, onCourt: [...r.onCourt, newPlayer] };
       return { ...r, onCourt: r.onCourt.map(p => p === slotPlayer ? newPlayer : p) };
@@ -317,7 +382,15 @@ export default function App() {
   }
 
   const canSub  = (status === "running" || status === "paused") && currentRot < sequence.length - 1;
-  const canUndo = (status === "running" || status === "paused") && gameLog.some(e => e.type === "sub");
+  const canUndo = (status === "running" || status === "paused") && curGame.log.some(e => e.type === "sub");
+  const nextGameLabel = gameLabel(games.length);
+
+  // Times tab scope
+  const scopeTimes  = timeScope === "game" ? game.times : dayTimes;
+  const perGameTarget = GAME_MS / 2;                       // 4:00 each per game
+  const scopeTarget = timeScope === "game" ? perGameTarget : perGameTarget * games.length;
+  const scopeSegs   = timeScope === "game" ? game.segments.length : daySegments;
+  const scopeStarted = timeScope === "game" ? gameStarted : daySegments > 0;
 
   // ─────────────────────────────────────────────────────────────
   //  RENDER
@@ -331,10 +404,14 @@ export default function App() {
                     borderBottom:"1px solid #ffffff15", padding:"16px 20px 12px",
                     position:"sticky", top:0, zIndex:10 }}>
         <div style={{ fontSize:11, letterSpacing:3, color:"#f97316", fontWeight:700, textTransform:"uppercase" }}>
-          U8 Basketball
+          U8 Basketball · Round Robin
         </div>
-        <div style={{ fontSize:22, fontWeight:800, marginTop:2, display:"flex", alignItems:"center", gap:10 }}>
+        <div style={{ fontSize:22, fontWeight:800, marginTop:2, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
           Rotation Manager
+          <span style={{ fontSize:11, color:"#f97316", background:"#f9731620",
+                         borderRadius:6, padding:"2px 8px", fontWeight:700 }}>
+            {curGame.label}{curIdx < PLANNED_GAMES ? ` of ${PLANNED_GAMES}` : ""}
+          </span>
           {status === "running" && (
             <span style={{ fontSize:11, color:"#22d3ee", background:"#22d3ee20",
                            borderRadius:6, padding:"2px 8px", fontWeight:600 }}>● LIVE</span>
@@ -389,6 +466,11 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              <div style={{ marginTop:4, fontSize:13, fontWeight:600,
+                            color: gameElapsed > GAME_MS ? "#ef4444" : "#888" }}>
+                Game clock {fmt(gameElapsed)} / {fmt(GAME_MS)}
+                {gameElapsed > GAME_MS && " — over time!"}
+              </div>
               {overdue && (
                 <div style={{ background:"#ef444420", border:"1px solid #ef4444",
                               borderRadius:8, padding:"6px 16px", marginTop:8,
@@ -400,12 +482,14 @@ export default function App() {
           )}
 
           {/* Rotation card */}
-          {rot && (
+          {rot && status !== "ended" && (
             <div style={{ background:"linear-gradient(135deg,#1e1e3f,#1a1a2e)",
                           borderRadius:16, padding:20, border:"1px solid #ffffff15", marginBottom:16 }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
                 <div>
-                  <div style={{ fontSize:10, color:"#888", letterSpacing:2, textTransform:"uppercase" }}>Rotation</div>
+                  <div style={{ fontSize:10, color:"#888", letterSpacing:2, textTransform:"uppercase" }}>
+                    {curGame.label} · Rotation
+                  </div>
                   <div style={{ fontSize:36, fontWeight:900, lineHeight:1 }}>
                     {currentRot+1}<span style={{ fontSize:16, color:"#888" }}>/{sequence.length}</span>
                   </div>
@@ -516,20 +600,22 @@ export default function App() {
           )}
 
           {/* Sub controls */}
-          <div style={{ display:"flex", gap:10 }}>
-            <button onClick={undoSub} disabled={!canUndo} style={{
-              flex:1, padding:"14px 0",
-              background: !canUndo ? "#ffffff08" : "#ffffff15",
-              color: !canUndo ? "#444" : "#fff",
-              border:"1px solid #ffffff15", borderRadius:12, fontSize:15, fontWeight:700,
-              cursor: !canUndo ? "default" : "pointer" }}>← Undo</button>
-            <button onClick={doSub} disabled={!canSub} style={{
-              flex:2, padding:"14px 0",
-              background: !canSub ? "#ffffff08" : "linear-gradient(135deg,#f97316,#fb923c)",
-              color: !canSub ? "#444" : "#000",
-              border:"none", borderRadius:12, fontSize:17, fontWeight:900,
-              cursor: !canSub ? "default" : "pointer" }}>Make Sub →</button>
-          </div>
+          {status !== "ended" && (
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={undoSub} disabled={!canUndo} style={{
+                flex:1, padding:"14px 0",
+                background: !canUndo ? "#ffffff08" : "#ffffff15",
+                color: !canUndo ? "#444" : "#fff",
+                border:"1px solid #ffffff15", borderRadius:12, fontSize:15, fontWeight:700,
+                cursor: !canUndo ? "default" : "pointer" }}>← Undo</button>
+              <button onClick={doSub} disabled={!canSub} style={{
+                flex:2, padding:"14px 0",
+                background: !canSub ? "#ffffff08" : "linear-gradient(135deg,#f97316,#fb923c)",
+                color: !canSub ? "#444" : "#000",
+                border:"none", borderRadius:12, fontSize:17, fontWeight:900,
+                cursor: !canSub ? "default" : "pointer" }}>Make Sub →</button>
+            </div>
+          )}
 
           {/* End game */}
           {(status === "running" || status === "paused") && (
@@ -537,38 +623,63 @@ export default function App() {
               width:"100%", marginTop:10, padding:"12px 0",
               background:"#ef444420", color:"#ef4444",
               border:"1px solid #ef444460", borderRadius:12, fontSize:14, fontWeight:700, cursor:"pointer" }}>
-              ■ End Game (final whistle)
+              ■ End {curGame.label} (final whistle)
             </button>
           )}
 
+          {/* Between games */}
           {status === "ended" && (
-            <div style={{ marginTop:16, padding:16, background:"#22d3ee10",
+            <div style={{ padding:16, background:"#22d3ee10",
                           border:"1px solid #22d3ee40", borderRadius:12, textAlign:"center" }}>
-              <div style={{ fontSize:15, fontWeight:800, color:"#22d3ee" }}>🏀 Game over!</div>
+              <div style={{ fontSize:15, fontWeight:800, color:"#22d3ee" }}>🏀 {curGame.label} done!</div>
               <div style={{ fontSize:12, color:"#888", marginTop:4 }}>
-                Court times are frozen — check the ⏱ Time tab.
+                Court times are banked for the day — check the ⏱ Time tab.
               </div>
+              <button onClick={startNextGame} style={{
+                width:"100%", marginTop:14, padding:"14px 0",
+                background:"linear-gradient(135deg,#f97316,#fb923c)", color:"#000",
+                border:"none", borderRadius:12, fontSize:17, fontWeight:900, cursor:"pointer" }}>
+                ▶ Set up {nextGameLabel}
+              </button>
+              <div style={{ fontSize:11, color:"#666", marginTop:8 }}>
+                Lineup is auto-balanced from everyone's minutes so far — tweak it in ⚙ Setup before tip-off.
+              </div>
+              <button onClick={undoEnd} style={{
+                marginTop:10, padding:"8px 16px", background:"transparent", color:"#555",
+                border:"1px solid #333", borderRadius:8, fontSize:12, cursor:"pointer" }}>
+                ↺ Undo end (resume this game)
+              </button>
             </div>
           )}
 
-          {gameStarted && (
-            confirmReset ? (
+          {/* Oops — created next game too early */}
+          {status === "idle" && curIdx > 0 && !gameStarted && (
+            <button onClick={backToPrevGame} style={{
+              width:"100%", marginTop:10, padding:"10px 0",
+              background:"transparent", color:"#555",
+              border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>
+              ← Back to {games[curIdx-1].label}
+            </button>
+          )}
+
+          {gameStarted && status !== "ended" && (
+            confirmReset === "game" ? (
               <div style={{ display:"flex", gap:10, marginTop:10 }}>
-                <button onClick={() => setConfirmReset(false)} style={{
+                <button onClick={() => setConfirmReset(null)} style={{
                   flex:1, padding:"10px 0", background:"#ffffff10", color:"#aaa",
                   border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>Cancel</button>
                 <button onClick={resetGame} style={{
                   flex:1, padding:"10px 0", background:"#ef4444", color:"#fff",
                   border:"none", borderRadius:10, fontSize:13, fontWeight:700, cursor:"pointer" }}>
-                  Yes, wipe game data
+                  Yes, wipe {curGame.label}
                 </button>
               </div>
             ) : (
-              <button onClick={() => setConfirmReset(true)} style={{
+              <button onClick={() => setConfirmReset("game")} style={{
                 width:"100%", marginTop:10, padding:"10px 0",
                 background:"transparent", color:"#555",
                 border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>
-                ↺ Reset Game
+                ↺ Reset {curGame.label} (clock &amp; times, this game only)
               </button>
             )
           )}
@@ -635,27 +746,24 @@ export default function App() {
           </div>
 
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
-            <div style={{ fontSize:15, fontWeight:700 }}>Rotation Order</div>
-            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-              {hasSaved && (
-                <button onClick={resetLineup} style={{
-                  fontSize:11, padding:"5px 10px", background:"#ffffff08",
-                  color:"#666", border:"1px solid #333", borderRadius:8, cursor:"pointer" }}>↺ Reset</button>
-              )}
-              <button onClick={saveLineup} style={{
-                fontSize:13, padding:"6px 16px", fontWeight:700, border:"none",
-                background: saveStatus==="saved"?"#22d3ee":saveStatus==="error"?"#ef4444":"#f97316",
-                color: saveStatus==="error"?"#fff":"#000",
-                borderRadius:8, cursor:"pointer" }}>
-                {saveStatus==="saved" ? "✓ Saved!" : saveStatus==="error" ? "✗ Try again" : "💾 Save Lineup"}
-              </button>
-            </div>
+            <div style={{ fontSize:15, fontWeight:700 }}>{curGame.label} Rotations</div>
+            <button onClick={autoBalance} disabled={gameStarted} style={{
+              fontSize:13, padding:"6px 16px", fontWeight:700, border:"none",
+              background: gameStarted ? "#ffffff08" : "#f97316",
+              color: gameStarted ? "#444" : "#000",
+              borderRadius:8, cursor: gameStarted ? "default" : "pointer" }}>
+              ✨ Auto-balance
+            </button>
           </div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
-            ↑↓ reorder rotations · tap player to swap · hold &amp; drag a player along the row to line up her colour · save to keep after restart
+            Every sub swaps 2 girls; each pair plays two 2-min rotations back-to-back.
+            {gameStarted
+              ? " Game underway — tap a player to swap, hold & drag to reorder."
+              : " Auto-balance rebuilds the lineup from everyone's minutes so far today."}
+            {" "}Everything saves automatically.
           </div>
 
-          {rotations.map((rotRow, i) => {
+          {curGame.rotations.map((rotRow, i) => {
             const effRot = effectiveRots[i];
             const seq    = sequence[i];
             return (
@@ -663,7 +771,7 @@ export default function App() {
                                          marginBottom:10, border:"1px solid #ffffff0a" }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
                   <div style={{ fontSize:12, color:"#888" }}>
-                    Rotation {i+1}
+                    Rotation {i+1} <span style={{ color:"#555" }}>({fmt(i*ROT_MS)}–{fmt((i+1)*ROT_MS)})</span>
                     {effRot.onCourt.length < 4 && (
                       <span style={{ marginLeft:8, color:"#ef4444", fontSize:11 }}>
                         ⚠ {effRot.onCourt.length}/4 players
@@ -672,12 +780,12 @@ export default function App() {
                   </div>
                   <div style={{ display:"flex", gap:4 }}>
                     {i > 0 && (
-                      <button onClick={() => { const r=[...rotations]; [r[i-1],r[i]]=[r[i],r[i-1]]; setRotations(r); }}
+                      <button onClick={() => setCurRotations(prev => { const r=[...prev]; [r[i-1],r[i]]=[r[i],r[i-1]]; return r; })}
                         style={{ background:"#ffffff15", border:"none", color:"#fff",
                                  borderRadius:6, padding:"3px 8px", cursor:"pointer" }}>↑</button>
                     )}
-                    {i < rotations.length-1 && (
-                      <button onClick={() => { const r=[...rotations]; [r[i],r[i+1]]=[r[i+1],r[i]]; setRotations(r); }}
+                    {i < curGame.rotations.length-1 && (
+                      <button onClick={() => setCurRotations(prev => { const r=[...prev]; [r[i],r[i+1]]=[r[i+1],r[i]]; return r; })}
                         style={{ background:"#ffffff15", border:"none", color:"#fff",
                                  borderRadius:6, padding:"3px 8px", cursor:"pointer" }}>↓</button>
                     )}
@@ -732,24 +840,59 @@ export default function App() {
               </div>
             );
           })}
+
+          {/* Danger zone */}
+          <div style={{ marginTop:24, paddingTop:16, borderTop:"1px solid #ffffff10" }}>
+            {confirmReset === "day" ? (
+              <div style={{ display:"flex", gap:10 }}>
+                <button onClick={() => setConfirmReset(null)} style={{
+                  flex:1, padding:"10px 0", background:"#ffffff10", color:"#aaa",
+                  border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>Cancel</button>
+                <button onClick={resetDay} style={{
+                  flex:1, padding:"10px 0", background:"#ef4444", color:"#fff",
+                  border:"none", borderRadius:10, fontSize:13, fontWeight:700, cursor:"pointer" }}>
+                  Yes, wipe the whole day
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmReset("day")} style={{
+                width:"100%", padding:"10px 0",
+                background:"transparent", color:"#555",
+                border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>
+                ↺ Reset whole day (all games &amp; times — names are kept)
+              </button>
+            )}
+          </div>
         </div>
       )}
 
       {/* ══ TIMES VIEW ══ */}
       {view === "times" && (
         <div style={{ padding:16 }}>
-          <div style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>Court Time Tracker</div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+            <div style={{ fontSize:15, fontWeight:700 }}>Court Time Tracker</div>
+            <div style={{ display:"flex", background:"#ffffff08", borderRadius:8, padding:2 }}>
+              {[["game", curGame.label],["day","Whole day"]].map(([v, label]) => (
+                <button key={v} onClick={() => setTimeScope(v)} style={{
+                  padding:"5px 12px", fontSize:12, fontWeight:700, border:"none", borderRadius:6,
+                  background: timeScope===v ? "#f97316" : "transparent",
+                  color: timeScope===v ? "#000" : "#888", cursor:"pointer" }}>{label}</button>
+              ))}
+            </div>
+          </div>
           <div style={{ fontSize:12, color:"#666", marginBottom:16 }}>
-            {!gameStarted
+            {!scopeStarted
               ? "Start the game to track time"
-              : `${game.segments.length} rotation${game.segments.length!==1?"s":""} logged${status==="paused"?" · clock paused":status==="ended"?" · final":""}`}
+              : timeScope === "game"
+                ? `${game.segments.length} rotation${game.segments.length!==1?"s":""} logged${status==="paused"?" · clock paused":status==="ended"?" · final":""}`
+                : `${games.length} game${games.length!==1?"s":""} · target ${fmt(scopeTarget)} each so far`}
           </div>
 
           {PLAYERS.map(p => {
-            const ms       = courtTimes[p] || 0;
-            const barPct   = Math.min(ms / (30*60*1000), 1);
-            const isUnder  = ms < 15*60*1000 * 0.85;
-            const isOver   = ms > 15*60*1000 * 1.15;
+            const ms       = scopeTimes[p] || 0;
+            const barPct   = Math.min(ms / (scopeTarget * 2), 1);
+            const isUnder  = ms < scopeTarget * 0.85;
+            const isOver   = ms > scopeTarget * 1.15;
             const isAbsent  = absent.includes(p);
             const isInjured = injured.includes(p);
             return (
@@ -761,14 +904,14 @@ export default function App() {
                     {isAbsent  && <span style={{ fontSize:10, background:"#ef444420", color:"#ef4444", borderRadius:4, padding:"1px 5px" }}>AWAY</span>}
                   </div>
                   <div style={{ fontSize:14, fontWeight:700,
-                                color: gameStarted&&isUnder?"#ef4444":isOver?"#fbbf24":"#aaa" }}>
+                                color: scopeStarted&&isUnder?"#ef4444":isOver?"#fbbf24":"#aaa" }}>
                     {fmt(ms)}
-                    {gameStarted && <span style={{ fontSize:11, color:"#555", marginLeft:4 }}>/ 15:00</span>}
+                    {scopeStarted && <span style={{ fontSize:11, color:"#555", marginLeft:4 }}>/ {fmt(scopeTarget)}</span>}
                   </div>
                 </div>
                 <div style={{ height:8, background:"#ffffff0a", borderRadius:4, overflow:"hidden" }}>
                   <div style={{ height:"100%", width:`${barPct*100}%`,
-                                background: game.segments.length>2&&isUnder?"#ef4444":isOver?"#fbbf24":playerColor(p),
+                                background: scopeSegs>2&&isUnder?"#ef4444":isOver?"#fbbf24":playerColor(p),
                                 borderRadius:4, transition:"width 0.5s" }}/>
                 </div>
                 <div style={{ position:"relative", height:8 }}>
@@ -779,11 +922,18 @@ export default function App() {
             );
           })}
 
-          {game.segments.length > 0 && (
-            <div style={{ marginTop:12, padding:14, background:"#ffffff06",
+          {/* Rotation log per game */}
+          {games.map((g, gi) => analyses[gi].segments.length > 0 && (
+            <div key={g.id} style={{ marginTop:12, padding:14, background:"#ffffff06",
                           borderRadius:12, border:"1px solid #ffffff0a" }}>
-              <div style={{ fontSize:12, color:"#888", marginBottom:8 }}>Rotation Log</div>
-              {game.segments.map((seg, i) => (
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:8 }}>
+                <span style={{ color:"#888", fontWeight:700 }}>{g.label} rotation log</span>
+                <span style={{ color:"#666" }}>
+                  {fmt(analyses[gi].segments.reduce((s, seg) => s + seg.dur, 0))} total
+                  {gi === curIdx && status !== "ended" ? " · live" : ""}
+                </span>
+              </div>
+              {analyses[gi].segments.map((seg, i) => (
                 <div key={i} style={{ display:"flex", justifyContent:"space-between",
                                       fontSize:12, padding:"4px 0", borderBottom:"1px solid #ffffff08" }}>
                   <span style={{ color:"#666" }}>Rot {seg.rotIndex+1}</span>
@@ -791,7 +941,7 @@ export default function App() {
                 </div>
               ))}
             </div>
-          )}
+          ))}
         </div>
       )}
 
