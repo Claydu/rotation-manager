@@ -1,24 +1,36 @@
 # U8 Basketball Rotation Manager
 
 Courtside app for managing player rotations, substitutions, and court time
-for a U8 basketball team. 8 players, 4 on court, sub 2 every 5 minutes —
-everyone gets 15 minutes across a 30-minute game.
+across a round-robin tournament day: 4× 8-minute games (plus a final if
+they make it), 8 players, 4 on court.
+
+**The rotation pattern:** every sub swaps exactly 2 girls. The squad is
+split into 4 pairs and each rotation has two pairs on court, laddering
+every 2 minutes — so each girl plays a continuous 4-minute block per game
+(two rotations back to back) and everyone lands on 4:00 per game, 16:00
+across the round robin. The one pair whose block wraps around the
+first/last rotation changes each game, so that evens out over the day too.
 
 ## Using it on game day
 
 - **▶ Game tab** — start the game, see who's on court, who subs ON/OFF next,
-  and a 5-minute countdown ring since the last sub.
-- **⏸ Pause** — tap the yellow pause button at half time (or any stoppage).
-  The clock and court-time tracking freeze until you tap ▶ resume.
-  Making a sub while paused automatically resumes the clock.
-- **⚙ Setup tab** — mark girls Away/Injured (removed from all rotations),
-  reorder rotations, or tap a player to swap her for someone else.
-- **⏱ Time tab** — live court time per player vs the 15:00 target, plus a
-  log of how long each rotation actually ran.
+  a 2-minute countdown ring since the last sub, and the ~8:00 game clock.
+- **⏸ Pause** — tap the yellow pause button at any stoppage. The clock and
+  court-time tracking freeze until you tap ▶ resume. Making a sub while
+  paused automatically resumes the clock.
+- **■ End game** at the final whistle, then **▶ Set up the next game** —
+  the new lineup is auto-balanced from everyone's minutes so far that day,
+  which matters most when a girl is away or injured for part of the day.
+- **⚙ Setup tab** — player names, mark girls Away/Injured (removed from all
+  rotations), edit the current game's rotations (tap to swap, hold & drag
+  to reorder), or ✨ Auto-balance before tip-off.
+- **⏱ Time tab** — court time per player, toggled between **this game**
+  (vs 4:00) and the **whole day** (vs 4:00 × games played), plus a rotation
+  log for every game.
 
 Everything auto-saves on the phone. If the app is closed, the phone locks,
-or the browser reloads, the game picks up exactly where it was — including
-the running clock, because all times are computed from timestamps.
+or the browser reloads — even between games — the day picks up exactly
+where it was, because all times are computed from timestamps.
 
 ## Privacy
 
