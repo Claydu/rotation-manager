@@ -1,32 +1,38 @@
-# U8 Basketball Rotation Manager
+# U10 Basketball Rotation Manager
 
-Courtside app for managing player rotations, substitutions, and court time
-across a round-robin tournament day: 4× 8-minute games (plus a final if
-they make it), 8 players, 4 on court.
+Courtside app for managing player rotations, substitutions, guard matchups,
+and court time across a game day. U10 format: 5 on court from a squad of 7
+(8 next season), with the game length preset once the season's half length
+is known.
 
-**The rotation pattern:** every sub swaps exactly 2 girls. The squad is
-split into 4 pairs and each rotation has two pairs on court, laddering
-every 2 minutes — so each girl plays a continuous 4-minute block per game
-(two rotations back to back) and everyone lands on 4:00 per game, 16:00
-across the round robin. The one pair whose block wraps around the
-first/last rotation changes each game, so that evens out over the day too.
+**The rotation pattern:** every sub swaps 2 girls. The on-court five is a
+window that slides 2 spots around the squad each rotation, so each girl
+plays blocks of consecutive rotations rather than bitsy shifts. 5-of-7
+never divides evenly inside one game, so the girls who are behind on
+minutes for the day are automatically given the higher-minute spots in the
+next game — across a day the spread stays within a few minutes.
 
 ## Using it on game day
 
-- **▶ Game tab** — start the game, see who's on court, who subs ON/OFF next,
-  a 2-minute countdown ring since the last sub, and the ~8:00 game clock.
-- **⏸ Pause** — tap the yellow pause button at any stoppage. The clock and
-  court-time tracking freeze until you tap ▶ resume. Making a sub while
-  paused automatically resumes the clock.
+- **▶ Game tab** — start the game, see who's on court, who subs ON/OFF
+  next, the since-sub countdown ring, and the game clock vs the preset
+  length (with 1st/2nd half shown).
+- **Guard matchups** — tap any on-court player to record the opposition
+  number she's guarding (🛡 #7). When girls sub off, the OFF chips and the
+  next-sub preview show which numbers are freed up so you can reassign
+  on the spot.
+- **⏸ Pause** — tap the yellow pause button at half time or any stoppage.
+  The clock and court-time tracking freeze until you tap ▶ resume. Making
+  a sub while paused automatically resumes the clock.
 - **■ End game** at the final whistle, then **▶ Set up the next game** —
-  the new lineup is auto-balanced from everyone's minutes so far that day,
-  which matters most when a girl is away or injured for part of the day.
-- **⚙ Setup tab** — player names, mark girls Away/Injured (removed from all
-  rotations), edit the current game's rotations (tap to swap, hold & drag
-  to reorder), or ✨ Auto-balance before tip-off.
+  the new lineup is auto-balanced from everyone's minutes so far that day.
+- **⚙ Setup tab** — the Game Format card (halves × half length, sub
+  interval, squad size, players on court), player names, Away/Injured
+  availability, and the current game's rotations (tap to swap, hold & drag
+  to reorder, ✨ Auto-balance before tip-off).
 - **⏱ Time tab** — court time per player, toggled between **this game**
-  (vs 4:00) and the **whole day** (vs 4:00 × games played), plus a rotation
-  log for every game.
+  and the **whole day**, each against its fair-share target, plus a
+  rotation log for every game.
 
 Everything auto-saves on the phone. If the app is closed, the phone locks,
 or the browser reloads — even between games — the day picks up exactly
@@ -36,7 +42,8 @@ where it was, because all times are computed from timestamps.
 
 Player names are never stored in this repository or the published app.
 The app only knows players as ids (p1–p8); real names are typed into the
-Setup tab and saved in the phone's local browser storage only.
+Setup tab and saved in the phone's local browser storage only. Guard
+matchup notes live in the same on-device storage.
 
 ## Development
 

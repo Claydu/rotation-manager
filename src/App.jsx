@@ -6,19 +6,23 @@ import { useState, useEffect, useRef } from "react";
 const PLAYERS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"];
 const defaultName = p => `Player ${PLAYERS.indexOf(p) + 1}`;
 
-// ── Round-robin day format ───────────────────────────────────────
-// 4× 8-minute games (plus a final if they make it). Within each game,
-// sub 2 girls every 2 minutes: 4 rotations of 4. Pairs ladder — each
-// pair plays two consecutive rotations, so every girl gets a continuous
-// 4-minute block per game (the "wrap" pair splits first/last rotation,
-// and which pair wraps rotates each game).
-const ROT_MS        = 2 * 60 * 1000;
-const ROTS_PER_GAME = 4;
-const GAME_MS       = ROT_MS * ROTS_PER_GAME;
-const PLANNED_GAMES = 4;
+// ── U10 season format ────────────────────────────────────────────
+// 5 on court from a squad of 7 (8 next season). Half length varies by
+// competition, so the game format is preset in Setup: halves × half
+// length, plus the sub interval. Every sub still swaps 2 girls: the
+// on-court group is a window that slides 2 spots each rotation, so each
+// girl plays stints of 2-3 rotations in a row rather than bitsy shifts.
+const DEFAULT_SETTINGS = {
+  squadSize: 7,   // girls in the squad (8 potentially next season)
+  onCourt:   5,   // on the court at once
+  halves:    2,
+  halfMin:   18,  // minutes per half — adjust once the fixture is known
+  subMin:    4,   // minutes between subs
+};
+function rotsFor(s) { return Math.max(1, Math.ceil((s.halves * s.halfMin) / s.subMin)); }
 
-const KEY_TOURNEY = "u8_tourney_v1";
-const KEY_NAMES   = "u8_names_v1";
+const KEY_TOURNEY = "u10_tourney_v1";
+const KEY_NAMES   = "u8_names_v1";   // kept from last season so names carry over
 
 // Storage: localStorage first (survives app/phone restarts), with an
 // in-memory fallback so the app never crashes if storage is blocked.
@@ -55,40 +59,39 @@ function buildSequence(rotations, allPlayers) {
   });
 }
 
-// Build a game's rotations as a pairs ladder: pairs P0..P3, rotation i
-// puts P(i) + P(i+1) on court, so every sub is exactly 2 girls and every
-// pair plays 2 consecutive rotations. Pairs are formed least-day-minutes
-// first (so with 7 girls, or after an injury, the girls who are behind
-// get the extra slots), and the roster is offset per game so a different
-// pair takes the split first/last "wrap" stint each game.
-function generateRotations(cumTimes, players, gameIndex) {
-  if (players.length === 0) return Array.from({ length: ROTS_PER_GAME }, (_, i) => ({ id: i + 1, onCourt: [] }));
-  const offset  = (gameIndex * 2) % players.length;
-  const rotated = players.map((_, i) => players[(i + offset) % players.length]);
-  const sorted  = [...rotated].sort((a, b) => (cumTimes[a] || 0) - (cumTimes[b] || 0));
+// Build a game's rotations as a sliding window over a cycle of players:
+// rotation i puts positions (2i … 2i+ON-1 mod n) on court, so every sub
+// swaps at most 2 girls and each girl plays consecutive rotations in
+// blocks. Positions don't get perfectly equal time within one game
+// (5-of-7 never divides evenly), so the girls who are behind on day
+// minutes are assigned to the highest-coverage positions, and the
+// roster is offset per game so ties rotate who starts.
+function generateRotations(cumTimes, players, gameIndex, onCourtN, nRots) {
+  const n = players.length;
+  if (n === 0) return Array.from({ length: nRots }, (_, i) => ({ id: i + 1, onCourt: [] }));
+  const ON = Math.min(onCourtN, n);
 
-  const pairs = [];
-  for (let i = 0; i < sorted.length && pairs.length < 4; i += 2)
-    pairs.push(sorted.slice(i, i + 2));
-
-  const rots = [];
-  for (let i = 0; i < ROTS_PER_GAME; i++) {
-    const n = pairs.length;
-    const onCourt = [...new Set([...pairs[i % n], ...pairs[(i + 1) % n]])];
-    for (const p of sorted) {           // fill short rotations, least minutes first
-      if (onCourt.length >= 4) break;
-      if (!onCourt.includes(p)) onCourt.push(p);
-    }
-    rots.push({ id: i + 1, onCourt: onCourt.slice(0, 4) });
+  const coverage = Array(n).fill(0);
+  const windows  = [];
+  for (let i = 0; i < nRots; i++) {
+    const w = Array.from({ length: ON }, (_, j) => (i * 2 + j) % n);
+    windows.push(w);
+    w.forEach(pos => { coverage[pos]++; });
   }
-  return rots;
+
+  const offset  = (gameIndex * 2) % n;
+  const rotated = players.map((_, i) => players[(i + offset) % n]);
+  const sorted  = [...rotated].sort((a, b) => (cumTimes[a] || 0) - (cumTimes[b] || 0));
+  const posOrder = coverage.map((c, pos) => [c, pos])
+    .sort((a, b) => b[0] - a[0] || a[1] - b[1]).map(([, pos]) => pos);
+  const atPos = Array(n);
+  posOrder.forEach((pos, j) => { atPos[pos] = sorted[j]; });
+
+  return windows.map((w, i) => ({ id: i + 1, onCourt: w.map(pos => atPos[pos]) }));
 }
 
-function gameLabel(index) {
-  return index < PLANNED_GAMES ? `Game ${index + 1}` : index === PLANNED_GAMES ? "Final" : `Game ${index + 1}`;
-}
 function makeGame(index, rotations, unavailable) {
-  return { id: `g${index + 1}-${index}`, label: gameLabel(index), rotations, log: [], unavailable };
+  return { id: `g${index + 1}-${Date.now()}`, label: `Game ${index + 1}`, rotations, log: [], notes: {}, unavailable };
 }
 
 // ── Game clock model ─────────────────────────────────────────────
@@ -137,22 +140,44 @@ function fmt(ms) {
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
+function fmtNote(n) { return /^\d+$/.test(n) ? `#${n}` : n; }
 
 const COLORS = ["#f97316","#22d3ee","#a78bfa","#34d399","#fb7185","#fbbf24","#60a5fa","#f472b6"];
 function playerColor(p) { return COLORS[PLAYERS.indexOf(p) % COLORS.length]; }
 
+const stepBtn = { background:"#ffffff15", border:"none", color:"#fff", borderRadius:8,
+                  width:34, height:34, fontSize:18, fontWeight:800, cursor:"pointer" };
+function NumSetting({ label, value, suffix = "", min, max, step = 1, onChange }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                  padding:"8px 0", borderBottom:"1px solid #ffffff08" }}>
+      <div style={{ fontSize:13, color:"#aaa" }}>{label}</div>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <button onClick={() => onChange(Math.max(min, value - step))} style={stepBtn}>−</button>
+        <div style={{ fontSize:15, fontWeight:800, minWidth:58, textAlign:"center" }}>{value}{suffix}</div>
+        <button onClick={() => onChange(Math.min(max, value + step))} style={stepBtn}>+</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
-  // Tournament state — a list of games; the last one is the live game.
-  const [games,   setGames]   = useState(() => [makeGame(0, generateRotations({}, PLAYERS, 0), [])]);
-  const [names,   setNames]   = useState({});
-  const [absent,  setAbsent]  = useState([]);
-  const [injured, setInjured] = useState([]);
-  const [loaded,  setLoaded]  = useState(false);
+  // Season + tournament state — a list of games; the last one is live.
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [games,    setGames]    = useState(() => [makeGame(0,
+    generateRotations({}, PLAYERS.slice(0, DEFAULT_SETTINGS.squadSize), 0,
+                      DEFAULT_SETTINGS.onCourt, rotsFor(DEFAULT_SETTINGS)), [])]);
+  const [names,    setNames]    = useState({});
+  const [absent,   setAbsent]   = useState([]);
+  const [injured,  setInjured]  = useState([]);
+  const [loaded,   setLoaded]   = useState(false);
 
   // UI
   const [view,      setView]      = useState("game");
   const [timeScope, setTimeScope] = useState("day");   // 'game' | 'day'
   const [swapModal, setSwapModal] = useState(null);
+  const [noteModal, setNoteModal] = useState(null);    // player id being assigned a matchup
+  const [noteDraft, setNoteDraft] = useState("");
   const [confirmReset, setConfirmReset] = useState(null); // null | 'game' | 'day'
   const [now,       setNow]       = useState(Date.now());
   const [dragInfo,  setDragInfo]  = useState(null); // {rotIdx, player} while dragging
@@ -161,17 +186,22 @@ export default function App() {
 
   // Derived
   const name          = p => (names[p] || "").trim() || defaultName(p);
+  const ROSTER        = PLAYERS.slice(0, settings.squadSize);
+  const ON            = settings.onCourt;
+  const rotMs         = settings.subMin * 60 * 1000;
+  const gameMs        = settings.halves * settings.halfMin * 60 * 1000;
   const unavailable   = [...absent, ...injured];
-  const activePlayers = PLAYERS.filter(p => !unavailable.includes(p));
+  const activePlayers = ROSTER.filter(p => !unavailable.includes(p));
   const curIdx        = games.length - 1;
   const curGame       = games[curIdx];
+  const notes         = curGame.notes || {};
 
   // Analyze every game. Past games use the availability snapshot from
   // when they were played, so marking a girl away later never rewrites
   // the minutes she already earned.
   const analyses = games.map((g, i) => {
     const unav = i === curIdx ? unavailable : (g.unavailable || []);
-    const act  = PLAYERS.filter(p => !unav.includes(p));
+    const act  = ROSTER.filter(p => !unav.includes(p));
     const seq  = buildSequence(applyAvailability(g.rotations, unav), act);
     return { ...analyzeGame(g.log, seq, PLAYERS, now), seq };
   });
@@ -181,8 +211,8 @@ export default function App() {
   const { status }    = game;            // idle | running | paused | ended
   const currentRot    = game.rotIndex;
   const rot           = sequence[currentRot];
-  const timerPct      = Math.min(game.sinceSub / ROT_MS, 1);
-  const overdue       = status === "running" && game.sinceSub > ROT_MS;
+  const timerPct      = Math.min(game.sinceSub / rotMs, 1);
+  const overdue       = status === "running" && game.sinceSub > rotMs;
   const gameStarted   = curGame.log.length > 0;
   const gameElapsed   = game.segments.reduce((s, seg) => s + seg.dur, 0);
 
@@ -195,8 +225,9 @@ export default function App() {
     const saved = retrieve(KEY_TOURNEY);
     if (saved?.games?.length) {
       setGames(saved.games);
-      if (saved.absent)  setAbsent(saved.absent);
-      if (saved.injured) setInjured(saved.injured);
+      if (saved.absent)   setAbsent(saved.absent);
+      if (saved.injured)  setInjured(saved.injured);
+      if (saved.settings) setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
     }
     const savedNames = retrieve(KEY_NAMES);
     if (savedNames) setNames(savedNames);
@@ -206,8 +237,8 @@ export default function App() {
   // ── Auto-save everything on every change ──────────────────────
   useEffect(() => {
     if (!loaded) return;
-    persist(KEY_TOURNEY, { games, absent, injured });
-  }, [loaded, games, absent, injured]);
+    persist(KEY_TOURNEY, { games, absent, injured, settings });
+  }, [loaded, games, absent, injured, settings]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -288,10 +319,20 @@ export default function App() {
     updateCurGame(g => ({ ...g, log: g.log.slice(0, idx) }));
   }
 
+  // ── Season settings ───────────────────────────────────────────
+  function updateSettings(patch) {
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    if (gameStarted) return;   // live game keeps its rotations
+    const roster = PLAYERS.slice(0, next.squadSize);
+    const act    = roster.filter(p => !unavailable.includes(p));
+    setCurRotations(generateRotations(dayTimes, act, curIdx, next.onCourt, rotsFor(next)));
+  }
+
   // ── Tournament controls ───────────────────────────────────────
   function startNextGame() {
     setGames(prev => [...prev, makeGame(prev.length,
-      generateRotations(dayTimes, activePlayers, prev.length), unavailable)]);
+      generateRotations(dayTimes, activePlayers, prev.length, ON, rotsFor(settings)), unavailable)]);
     setView("game");
   }
   function backToPrevGame() {
@@ -301,16 +342,30 @@ export default function App() {
   }
   function autoBalance() {
     if (gameStarted) return;
-    setCurRotations(generateRotations(dayTimes, activePlayers, curIdx));
+    setCurRotations(generateRotations(dayTimes, activePlayers, curIdx, ON, rotsFor(settings)));
   }
   function resetGame() {
     updateCurGame(g => ({ ...g, log: [] }));
     setConfirmReset(null);
   }
   function resetDay() {
-    setGames([makeGame(0, generateRotations({}, activePlayers, 0), unavailable)]);
+    setGames([makeGame(0, generateRotations({}, activePlayers, 0, ON, rotsFor(settings)), unavailable)]);
     setConfirmReset(null);
-    forget(KEY_TOURNEY);
+  }
+
+  // ── Guard matchups (opposition numbers) ───────────────────────
+  function openNote(p) {
+    setNoteModal(p);
+    setNoteDraft(notes[p] || "");
+  }
+  function saveNote(value) {
+    const v = value.trim().replace(/^#/, "");
+    updateCurGame(g => {
+      const nn = { ...(g.notes || {}) };
+      if (v) nn[noteModal] = v; else delete nn[noteModal];
+      return { ...g, notes: nn };
+    });
+    setNoteModal(null);
   }
 
   // ── Availability ──────────────────────────────────────────────
@@ -383,12 +438,12 @@ export default function App() {
 
   const canSub  = (status === "running" || status === "paused") && currentRot < sequence.length - 1;
   const canUndo = (status === "running" || status === "paused") && curGame.log.some(e => e.type === "sub");
-  const nextGameLabel = gameLabel(games.length);
 
   // Times tab scope
+  const gameTarget  = activePlayers.length > 0
+    ? gameMs * Math.min(ON, activePlayers.length) / activePlayers.length : 0;
   const scopeTimes  = timeScope === "game" ? game.times : dayTimes;
-  const perGameTarget = GAME_MS / 2;                       // 4:00 each per game
-  const scopeTarget = timeScope === "game" ? perGameTarget : perGameTarget * games.length;
+  const scopeTarget = timeScope === "game" ? gameTarget : gameTarget * games.length;
   const scopeSegs   = timeScope === "game" ? game.segments.length : daySegments;
   const scopeStarted = timeScope === "game" ? gameStarted : daySegments > 0;
 
@@ -404,14 +459,12 @@ export default function App() {
                     borderBottom:"1px solid #ffffff15", padding:"16px 20px 12px",
                     position:"sticky", top:0, zIndex:10 }}>
         <div style={{ fontSize:11, letterSpacing:3, color:"#f97316", fontWeight:700, textTransform:"uppercase" }}>
-          U8 Basketball · Round Robin
+          U10 Basketball
         </div>
         <div style={{ fontSize:22, fontWeight:800, marginTop:2, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
           Rotation Manager
           <span style={{ fontSize:11, color:"#f97316", background:"#f9731620",
-                         borderRadius:6, padding:"2px 8px", fontWeight:700 }}>
-            {curGame.label}{curIdx < PLANNED_GAMES ? ` of ${PLANNED_GAMES}` : ""}
-          </span>
+                         borderRadius:6, padding:"2px 8px", fontWeight:700 }}>{curGame.label}</span>
           {status === "running" && (
             <span style={{ fontSize:11, color:"#22d3ee", background:"#22d3ee20",
                            borderRadius:6, padding:"2px 8px", fontWeight:600 }}>● LIVE</span>
@@ -467,9 +520,10 @@ export default function App() {
                 </div>
               </div>
               <div style={{ marginTop:4, fontSize:13, fontWeight:600,
-                            color: gameElapsed > GAME_MS ? "#ef4444" : "#888" }}>
-                Game clock {fmt(gameElapsed)} / {fmt(GAME_MS)}
-                {gameElapsed > GAME_MS && " — over time!"}
+                            color: gameElapsed > gameMs ? "#ef4444" : "#888" }}>
+                Game clock {fmt(gameElapsed)} / {fmt(gameMs)}
+                {settings.halves === 2 && ` · ${gameElapsed < settings.halfMin*60*1000 ? "1st" : "2nd"} half`}
+                {gameElapsed > gameMs && " — over time!"}
               </div>
               {overdue && (
                 <div style={{ background:"#ef444420", border:"1px solid #ef4444",
@@ -535,7 +589,9 @@ export default function App() {
                   <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
                     {rot.off.map(p => (
                       <span key={p} style={{ background:playerColor(p)+"20", border:`1.5px solid ${playerColor(p)}60`,
-                                             borderRadius:20, padding:"4px 12px", fontSize:14, fontWeight:600, color:playerColor(p)+"cc" }}>{name(p)}</span>
+                                             borderRadius:20, padding:"4px 12px", fontSize:14, fontWeight:600, color:playerColor(p)+"cc" }}>
+                        {name(p)}{notes[p] ? ` · frees ${fmtNote(notes[p])}` : ""}
+                      </span>
                     ))}
                   </div>
                 </div>
@@ -545,21 +601,27 @@ export default function App() {
 
               <div>
                 <div style={{ fontSize:10, letterSpacing:2, color:"#aaa", marginBottom:8, textTransform:"uppercase" }}>
-                  On Court Now
-                  {rot.onCourt.length < 4 && (
-                    <span style={{ marginLeft:8, color:"#ef4444" }}>({rot.onCourt.length}/4) — tap + to fill</span>
+                  On Court Now — tap a player to set who she's guarding
+                  {rot.onCourt.length < ON && (
+                    <span style={{ marginLeft:8, color:"#ef4444" }}>({rot.onCourt.length}/{ON}) — tap + to fill</span>
                   )}
                 </div>
-                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
                   {rot.onCourt.map(p => (
-                    <span key={p} style={{ background:playerColor(p), color:"#000",
-                                           borderRadius:20, padding:"5px 14px", fontSize:14, fontWeight:800 }}>{name(p)}</span>
+                    <button key={p} onClick={() => openNote(p)} style={{
+                      background:playerColor(p), color:"#000", border:"none",
+                      borderRadius:12, padding:"7px 12px", cursor:"pointer", textAlign:"left" }}>
+                      <div style={{ fontSize:14, fontWeight:800 }}>{name(p)}</div>
+                      <div style={{ fontSize:11, fontWeight:700, opacity: notes[p] ? 0.9 : 0.45 }}>
+                        {notes[p] ? `🛡 ${fmtNote(notes[p])}` : "＋ matchup"}
+                      </div>
+                    </button>
                   ))}
-                  {Array.from({ length: Math.max(0, 4 - rot.onCourt.length) }).map((_, i) => (
+                  {Array.from({ length: Math.max(0, ON - rot.onCourt.length) }).map((_, i) => (
                     <button key={"empty-"+i}
                       onClick={() => setSwapModal({ rotIdx:currentRot, slotPlayer:null })}
                       style={{ background:"#ef444415", border:"1.5px dashed #ef4444",
-                               borderRadius:20, padding:"5px 14px", fontSize:14,
+                               borderRadius:12, padding:"7px 14px", fontSize:14,
                                fontWeight:700, color:"#ef4444", cursor:"pointer" }}>+ Fill spot</button>
                   ))}
                 </div>
@@ -592,7 +654,9 @@ export default function App() {
                 <div>
                   <div style={{ fontSize:10, color:"#fb718580", marginBottom:4 }}>OUT</div>
                   {sequence[currentRot+1].off.map(p => (
-                    <div key={p} style={{ fontSize:13, color:"#fb7185", fontWeight:700 }}>{name(p)}</div>
+                    <div key={p} style={{ fontSize:13, color:"#fb7185", fontWeight:700 }}>
+                      {name(p)}{notes[p] ? <span style={{ color:"#fb718590", fontWeight:600 }}> · frees {fmtNote(notes[p])}</span> : ""}
+                    </div>
                   ))}
                 </div>
               </div>
@@ -639,7 +703,7 @@ export default function App() {
                 width:"100%", marginTop:14, padding:"14px 0",
                 background:"linear-gradient(135deg,#f97316,#fb923c)", color:"#000",
                 border:"none", borderRadius:12, fontSize:17, fontWeight:900, cursor:"pointer" }}>
-                ▶ Set up {nextGameLabel}
+                ▶ Set up Game {games.length + 1}
               </button>
               <div style={{ fontSize:11, color:"#666", marginTop:8 }}>
                 Lineup is auto-balanced from everyone's minutes so far — tweak it in ⚙ Setup before tip-off.
@@ -697,12 +761,33 @@ export default function App() {
       {/* ══ SETUP VIEW ══ */}
       {view === "setup" && (
         <div style={{ padding:16 }}>
+          <div style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>Game Format</div>
+          <div style={{ fontSize:12, color:"#666", marginBottom:8 }}>
+            Preset the game length once you know this season's halves. Changes apply to games that haven't started.
+          </div>
+          <div style={{ background:"#ffffff08", borderRadius:12, padding:"4px 14px", border:"1px solid #ffffff0a", marginBottom:8 }}>
+            <NumSetting label="Halves"            value={settings.halves}    min={1} max={4}
+                        onChange={v => updateSettings({ halves: v })}/>
+            <NumSetting label="Half length"       value={settings.halfMin}   min={4} max={30} suffix=" min"
+                        onChange={v => updateSettings({ halfMin: v })}/>
+            <NumSetting label="Sub every"         value={settings.subMin}    min={1} max={10} suffix=" min"
+                        onChange={v => updateSettings({ subMin: v })}/>
+            <NumSetting label="On court at once"  value={settings.onCourt}   min={3} max={5}
+                        onChange={v => updateSettings({ onCourt: v })}/>
+            <NumSetting label="Girls in squad"    value={settings.squadSize} min={5} max={8}
+                        onChange={v => updateSettings({ squadSize: v })}/>
+          </div>
+          <div style={{ fontSize:12, color:"#888", marginBottom:24 }}>
+            Game = {settings.halves} × {settings.halfMin}:00 = {fmt(gameMs)} · {rotsFor(settings)} rotations
+            · everyone ≈ {fmt(gameTarget)} per game
+          </div>
+
           <div style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>Player Names</div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
             Names are saved on this phone only — never published anywhere
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:24 }}>
-            {PLAYERS.map(p => (
+            {ROSTER.map(p => (
               <input key={p}
                 value={names[p] ?? ""}
                 placeholder={defaultName(p)}
@@ -718,7 +803,7 @@ export default function App() {
             Mark absent or injured — removed from all rotations automatically
           </div>
           <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:24 }}>
-            {PLAYERS.map(p => {
+            {ROSTER.map(p => {
               const isAbsent  = absent.includes(p);
               const isInjured = injured.includes(p);
               return (
@@ -756,7 +841,7 @@ export default function App() {
             </button>
           </div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
-            Every sub swaps 2 girls; each pair plays two 2-min rotations back-to-back.
+            Every sub swaps 2 girls, so each girl plays a few rotations in a row.
             {gameStarted
               ? " Game underway — tap a player to swap, hold & drag to reorder."
               : " Auto-balance rebuilds the lineup from everyone's minutes so far today."}
@@ -771,10 +856,10 @@ export default function App() {
                                          marginBottom:10, border:"1px solid #ffffff0a" }}>
                 <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
                   <div style={{ fontSize:12, color:"#888" }}>
-                    Rotation {i+1} <span style={{ color:"#555" }}>({fmt(i*ROT_MS)}–{fmt((i+1)*ROT_MS)})</span>
-                    {effRot.onCourt.length < 4 && (
+                    Rotation {i+1} <span style={{ color:"#555" }}>({fmt(i*rotMs)}–{fmt(Math.min((i+1)*rotMs, gameMs))})</span>
+                    {effRot.onCourt.length < ON && (
                       <span style={{ marginLeft:8, color:"#ef4444", fontSize:11 }}>
-                        ⚠ {effRot.onCourt.length}/4 players
+                        ⚠ {effRot.onCourt.length}/{ON} players
                       </span>
                     )}
                   </div>
@@ -820,7 +905,7 @@ export default function App() {
                       </button>
                     );
                   })}
-                  {Array.from({ length: Math.max(0, 4 - effRot.onCourt.length) }).map((_, idx) => (
+                  {Array.from({ length: Math.max(0, ON - effRot.onCourt.length) }).map((_, idx) => (
                     <button key={"empty-"+idx}
                       onClick={() => setSwapModal({ rotIdx:i, slotPlayer:null })}
                       style={{ background:"#ef444415", border:"1.5px dashed #ef4444",
@@ -859,7 +944,7 @@ export default function App() {
                 width:"100%", padding:"10px 0",
                 background:"transparent", color:"#555",
                 border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>
-                ↺ Reset whole day (all games &amp; times — names are kept)
+                ↺ Reset whole day (all games &amp; times — names and format are kept)
               </button>
             )}
           </div>
@@ -888,9 +973,9 @@ export default function App() {
                 : `${games.length} game${games.length!==1?"s":""} · target ${fmt(scopeTarget)} each so far`}
           </div>
 
-          {PLAYERS.map(p => {
+          {ROSTER.map(p => {
             const ms       = scopeTimes[p] || 0;
-            const barPct   = Math.min(ms / (scopeTarget * 2), 1);
+            const barPct   = scopeTarget > 0 ? Math.min(ms / (scopeTarget * 2), 1) : 0;
             const isUnder  = ms < scopeTarget * 0.85;
             const isOver   = ms > scopeTarget * 1.15;
             const isAbsent  = absent.includes(p);
@@ -942,6 +1027,42 @@ export default function App() {
               ))}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ══ MATCHUP MODAL ══ */}
+      {noteModal && (
+        <div style={{ position:"fixed", inset:0, background:"#000000cc", zIndex:100,
+                      display:"flex", alignItems:"flex-end" }}
+             onClick={() => setNoteModal(null)}>
+          <div style={{ background:"#1a1a2e", width:"100%", borderRadius:"20px 20px 0 0",
+                        padding:24, border:"1px solid #ffffff15" }}
+               onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize:12, color:"#888", marginBottom:4, letterSpacing:1, textTransform:"uppercase" }}>
+              Matchup
+            </div>
+            <div style={{ fontSize:20, fontWeight:800, marginBottom:16 }}>
+              <span style={{ color:playerColor(noteModal) }}>{name(noteModal)}</span>
+              <span style={{ color:"#555", marginLeft:8 }}>is guarding…</span>
+            </div>
+            <input
+              autoFocus
+              value={noteDraft}
+              placeholder="Opposition number, e.g. 7"
+              onChange={e => setNoteDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") saveNote(noteDraft); }}
+              style={{ background:"#ffffff08", border:"1.5px solid #f9731670",
+                       borderRadius:10, padding:"12px 14px", fontSize:18, fontWeight:700,
+                       color:"#f97316", outline:"none", width:"100%", marginBottom:14 }} />
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => saveNote("")} style={{
+                flex:1, padding:"12px 0", background:"#ffffff10", color:"#888",
+                border:"none", borderRadius:10, fontSize:14, cursor:"pointer" }}>Clear</button>
+              <button onClick={() => saveNote(noteDraft)} style={{
+                flex:2, padding:"12px 0", background:"#f97316", color:"#000",
+                border:"none", borderRadius:10, fontSize:15, fontWeight:800, cursor:"pointer" }}>Save</button>
+            </div>
+          </div>
         </div>
       )}
 
