@@ -33,6 +33,10 @@ next game — across a day the spread stays within a few minutes.
 - **⏱ Time tab** — court time per player, toggled between **this game**
   and the **whole day**, each against its fair-share target, plus a
   rotation log for every game.
+- **📝 Player notes & 📤 export** — tap 📝 next to a player on the Time tab
+  to jot game-day notes on her. "Export day summary" opens the phone's
+  share sheet with a plain-text summary (minutes per game, day totals,
+  player notes) ready to save into Apple Notes, Messages, or email.
 
 Everything auto-saves on the phone. If the app is closed, the phone locks,
 or the browser reloads — even between games — the day picks up exactly

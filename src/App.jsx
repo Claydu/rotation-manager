@@ -178,6 +178,10 @@ export default function App() {
   const [swapModal, setSwapModal] = useState(null);
   const [noteModal, setNoteModal] = useState(null);    // player id being assigned a matchup
   const [noteDraft, setNoteDraft] = useState("");
+  const [playerNotes, setPlayerNotes] = useState({});   // per-player game-day notes
+  const [pNoteModal, setPNoteModal]   = useState(null); // player id whose note is being edited
+  const [pNoteDraft, setPNoteDraft]   = useState("");
+  const [shareStatus, setShareStatus] = useState(null); // null | 'shared' | 'copied' | 'error'
   const [confirmReset, setConfirmReset] = useState(null); // null | 'game' | 'day'
   const [now,       setNow]       = useState(Date.now());
   const [dragInfo,  setDragInfo]  = useState(null); // {rotIdx, player} while dragging
@@ -225,9 +229,10 @@ export default function App() {
     const saved = retrieve(KEY_TOURNEY);
     if (saved?.games?.length) {
       setGames(saved.games);
-      if (saved.absent)   setAbsent(saved.absent);
-      if (saved.injured)  setInjured(saved.injured);
-      if (saved.settings) setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
+      if (saved.absent)      setAbsent(saved.absent);
+      if (saved.injured)     setInjured(saved.injured);
+      if (saved.settings)    setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
+      if (saved.playerNotes) setPlayerNotes(saved.playerNotes);
     }
     const savedNames = retrieve(KEY_NAMES);
     if (savedNames) setNames(savedNames);
@@ -237,8 +242,8 @@ export default function App() {
   // ── Auto-save everything on every change ──────────────────────
   useEffect(() => {
     if (!loaded) return;
-    persist(KEY_TOURNEY, { games, absent, injured, settings });
-  }, [loaded, games, absent, injured, settings]);
+    persist(KEY_TOURNEY, { games, absent, injured, settings, playerNotes });
+  }, [loaded, games, absent, injured, settings, playerNotes]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -350,6 +355,7 @@ export default function App() {
   }
   function resetDay() {
     setGames([makeGame(0, generateRotations({}, activePlayers, 0, ON, rotsFor(settings)), unavailable)]);
+    setPlayerNotes({});
     setConfirmReset(null);
   }
 
@@ -366,6 +372,55 @@ export default function App() {
       return { ...g, notes: nn };
     });
     setNoteModal(null);
+  }
+
+  // ── Player game-day notes ─────────────────────────────────────
+  function openPNote(p) {
+    setPNoteModal(p);
+    setPNoteDraft(playerNotes[p] || "");
+  }
+  function savePNote(value) {
+    const v = value.trim();
+    setPlayerNotes(prev => {
+      const nn = { ...prev };
+      if (v) nn[pNoteModal] = v; else delete nn[pNoteModal];
+      return nn;
+    });
+    setPNoteModal(null);
+  }
+
+  // ── Export / share the day's stats ────────────────────────────
+  // Plain text so it pastes cleanly into Apple Notes, Messages, etc.
+  function buildExport() {
+    const date = new Date().toLocaleDateString(undefined,
+      { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+    const lines = [`🏀 Game day — ${date}`];
+    games.forEach((g, gi) => {
+      const a = analyses[gi];
+      if (a.segments.length === 0) return;
+      const total = a.segments.reduce((s, seg) => s + seg.dur, 0);
+      lines.push("", `${g.label} — ${fmt(total)} played, ${a.segments.length} rotation${a.segments.length !== 1 ? "s" : ""}`);
+      ROSTER.forEach(p => { if (a.times[p] > 0) lines.push(`  ${name(p)}  ${fmt(a.times[p])}`); });
+    });
+    lines.push("", `Day totals (target ${fmt(gameTarget * games.length)} each)`);
+    ROSTER.forEach(p => lines.push(`  ${name(p)}  ${fmt(dayTimes[p] || 0)}`));
+    const noted = ROSTER.filter(p => (playerNotes[p] || "").trim());
+    if (noted.length > 0) {
+      lines.push("", "Player notes");
+      noted.forEach(p => lines.push(`  ${name(p)}: ${playerNotes[p].trim()}`));
+    }
+    return lines.join("\n");
+  }
+  async function shareExport() {
+    const text = buildExport();
+    if (navigator.share) {
+      try { await navigator.share({ title: "Game day summary", text }); setShareStatus("shared"); }
+      catch (e) { return; }   // user closed the share sheet — no status
+    } else {
+      try { await navigator.clipboard.writeText(text); setShareStatus("copied"); }
+      catch (e) { setShareStatus("error"); }
+    }
+    setTimeout(() => setShareStatus(null), 3000);
   }
 
   // ── Availability ──────────────────────────────────────────────
@@ -708,6 +763,12 @@ export default function App() {
               <div style={{ fontSize:11, color:"#666", marginTop:8 }}>
                 Lineup is auto-balanced from everyone's minutes so far — tweak it in ⚙ Setup before tip-off.
               </div>
+              <button onClick={shareExport} style={{
+                width:"100%", marginTop:10, padding:"11px 0",
+                background:"#ffffff12", color:"#ddd",
+                border:"1px solid #ffffff20", borderRadius:10, fontSize:14, fontWeight:700, cursor:"pointer" }}>
+                {shareStatus === "shared" ? "✓ Shared!" : shareStatus === "copied" ? "✓ Copied to clipboard" : "📤 Share day summary"}
+              </button>
               <button onClick={undoEnd} style={{
                 marginTop:10, padding:"8px 16px", background:"transparent", color:"#555",
                 border:"1px solid #333", borderRadius:8, fontSize:12, cursor:"pointer" }}>
@@ -944,7 +1005,7 @@ export default function App() {
                 width:"100%", padding:"10px 0",
                 background:"transparent", color:"#555",
                 border:"1px solid #333", borderRadius:10, fontSize:13, cursor:"pointer" }}>
-                ↺ Reset whole day (all games &amp; times — names and format are kept)
+                ↺ Reset whole day (games, times &amp; notes — names and format are kept)
               </button>
             )}
           </div>
@@ -987,6 +1048,9 @@ export default function App() {
                     <span style={{ fontWeight:700, fontSize:15, color:playerColor(p) }}>{name(p)}</span>
                     {isInjured && <span style={{ fontSize:10, background:"#fbbf2420", color:"#fbbf24", borderRadius:4, padding:"1px 5px" }}>⚠ INJ</span>}
                     {isAbsent  && <span style={{ fontSize:10, background:"#ef444420", color:"#ef4444", borderRadius:4, padding:"1px 5px" }}>AWAY</span>}
+                    <button onClick={() => openPNote(p)} style={{
+                      background:"transparent", border:"none", cursor:"pointer", padding:"0 2px",
+                      fontSize:13, opacity:(playerNotes[p]||"").trim() ? 1 : 0.35 }}>📝</button>
                   </div>
                   <div style={{ fontSize:14, fontWeight:700,
                                 color: scopeStarted&&isUnder?"#ef4444":isOver?"#fbbf24":"#aaa" }}>
@@ -1003,9 +1067,31 @@ export default function App() {
                   <div style={{ position:"absolute", left:"50%", top:-8,
                                 width:2, height:8, background:"#ffffff30" }}/>
                 </div>
+                {(playerNotes[p] || "").trim() && (
+                  <div style={{ fontSize:11, color:"#999", fontStyle:"italic", marginTop:-2 }}>
+                    📝 {playerNotes[p].trim()}
+                  </div>
+                )}
               </div>
             );
           })}
+
+          {/* Export / share */}
+          <button onClick={shareExport} disabled={daySegments === 0} style={{
+            width:"100%", marginTop:8, padding:"13px 0",
+            background: daySegments === 0 ? "#ffffff08"
+              : shareStatus ? "#22d3ee" : "linear-gradient(135deg,#f97316,#fb923c)",
+            color: daySegments === 0 ? "#444" : "#000",
+            border:"none", borderRadius:12, fontSize:15, fontWeight:800,
+            cursor: daySegments === 0 ? "default" : "pointer" }}>
+            {shareStatus === "shared" ? "✓ Shared!"
+              : shareStatus === "copied" ? "✓ Copied — paste into Notes"
+              : shareStatus === "error" ? "✗ Couldn't copy — try again"
+              : "📤 Export day summary"}
+          </button>
+          <div style={{ fontSize:11, color:"#666", textAlign:"center", marginTop:6 }}>
+            Opens the share sheet — save to Apple Notes, Messages, email… Includes minutes per game, day totals and player notes.
+          </div>
 
           {/* Rotation log per game */}
           {games.map((g, gi) => analyses[gi].segments.length > 0 && (
@@ -1059,6 +1145,42 @@ export default function App() {
                 flex:1, padding:"12px 0", background:"#ffffff10", color:"#888",
                 border:"none", borderRadius:10, fontSize:14, cursor:"pointer" }}>Clear</button>
               <button onClick={() => saveNote(noteDraft)} style={{
+                flex:2, padding:"12px 0", background:"#f97316", color:"#000",
+                border:"none", borderRadius:10, fontSize:15, fontWeight:800, cursor:"pointer" }}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ PLAYER NOTE MODAL ══ */}
+      {pNoteModal && (
+        <div style={{ position:"fixed", inset:0, background:"#000000cc", zIndex:100,
+                      display:"flex", alignItems:"flex-end" }}
+             onClick={() => setPNoteModal(null)}>
+          <div style={{ background:"#1a1a2e", width:"100%", borderRadius:"20px 20px 0 0",
+                        padding:24, border:"1px solid #ffffff15" }}
+               onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize:12, color:"#888", marginBottom:4, letterSpacing:1, textTransform:"uppercase" }}>
+              Game notes
+            </div>
+            <div style={{ fontSize:20, fontWeight:800, marginBottom:16 }}>
+              <span style={{ color:playerColor(pNoteModal) }}>{name(pNoteModal)}</span>
+            </div>
+            <textarea
+              autoFocus
+              value={pNoteDraft}
+              placeholder="e.g. great hustle on defence, work on left-hand dribble…"
+              onChange={e => setPNoteDraft(e.target.value)}
+              rows={4}
+              style={{ background:"#ffffff08", border:"1.5px solid #f9731670",
+                       borderRadius:10, padding:"12px 14px", fontSize:15, lineHeight:1.4,
+                       color:"#f0f0f0", outline:"none", width:"100%", marginBottom:14,
+                       resize:"none", fontFamily:"inherit" }} />
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => savePNote("")} style={{
+                flex:1, padding:"12px 0", background:"#ffffff10", color:"#888",
+                border:"none", borderRadius:10, fontSize:14, cursor:"pointer" }}>Clear</button>
+              <button onClick={() => savePNote(pNoteDraft)} style={{
                 flex:2, padding:"12px 0", background:"#f97316", color:"#000",
                 border:"none", borderRadius:10, fontSize:15, fontWeight:800, cursor:"pointer" }}>Save</button>
             </div>
