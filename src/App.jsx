@@ -136,6 +136,28 @@ function analyzeGame(log, sequence, players, now) {
   return { times, segments, sinceSub, status, rotIndex: Math.max(rotIndex, 0) };
 }
 
+// Rewrite a game's event log so total running time is capped at capMs:
+// the game is ended at the moment the cap was reached and later events
+// are dropped. Cleans up a forgotten pause/stop after full time.
+function trimLog(log, capMs, now) {
+  let acc = 0, running = false, last = null;
+  const out = [];
+  for (const ev of log) {
+    if (running && acc + (ev.ts - last) >= capMs) {
+      out.push({ type: "end", ts: last + (capMs - acc) });
+      return out;
+    }
+    if (running) acc += ev.ts - last;
+    out.push(ev);
+    running = ev.type === "start" || ev.type === "sub" || ev.type === "resume";
+    last = ev.ts;
+  }
+  if (running && acc + (now - last) >= capMs) {
+    out.push({ type: "end", ts: last + (capMs - acc) });
+  }
+  return out;
+}
+
 function fmt(ms) {
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -183,6 +205,7 @@ export default function App() {
   const [pNoteDraft, setPNoteDraft]   = useState("");
   const [shareStatus, setShareStatus] = useState(null); // null | 'shared' | 'copied' | 'error'
   const [confirmReset, setConfirmReset] = useState(null); // null | 'game' | 'day'
+  const [confirmTrim,  setConfirmTrim]  = useState(null); // game index pending trim
   const [now,       setNow]       = useState(Date.now());
   const [dragInfo,  setDragInfo]  = useState(null); // {rotIdx, player} while dragging
   const wakeLockRef = useRef(null);
@@ -265,6 +288,24 @@ export default function App() {
     return () => clearInterval(id);
   }, [status]);
 
+  // ── Semi-automatic half-time / full-time ──────────────────────
+  // When the game clock crosses a break or full time while running, the
+  // clock pauses itself (once per boundary) — the coach taps ▶ to
+  // restart play or ■ to end the game. Stops forgotten clocks from
+  // inflating court times.
+  useEffect(() => {
+    if (status !== "running") return;
+    const halfMs = settings.halfMin * 60 * 1000;
+    const taken = new Set(curGame.log.filter(e => e.type === "pause" && e.autoAt).map(e => e.autoAt));
+    for (let k = 1; k <= settings.halves; k++) {
+      const b = k * halfMs;
+      if (gameElapsed >= b && !taken.has(b)) {
+        addEvent({ type: "pause", autoAt: b, auto: k === settings.halves ? "full" : "break" });
+        break;
+      }
+    }
+  }, [now, status]);
+
   // ── Keep the screen awake during the game ─────────────────────
   useEffect(() => {
     if (status !== "running") {
@@ -346,8 +387,32 @@ export default function App() {
     setGames(prev => prev.slice(0, -1));
   }
   function autoBalance() {
-    if (gameStarted) return;
-    setCurRotations(generateRotations(dayTimes, activePlayers, curIdx, ON, rotsFor(settings)));
+    if (!gameStarted) {
+      setCurRotations(generateRotations(dayTimes, activePlayers, curIdx, ON, rotsFor(settings)));
+      return;
+    }
+    // Mid-game: keep the rotations already played (recorded minutes stay
+    // untouched) and rebuild from the current one onward. The new window
+    // order starts with who's on court now — highest day minutes first,
+    // so they come off soonest — then the bench, lowest minutes first.
+    const nRots = curGame.rotations.length;
+    const remaining = nRots - currentRot;
+    if (remaining <= 1 || status === "ended") return;
+    const onNow  = (effectiveRots[currentRot]?.onCourt || []).filter(p => activePlayers.includes(p));
+    const bench  = activePlayers.filter(p => !onNow.includes(p))
+      .sort((a, b) => (dayTimes[a] || 0) - (dayTimes[b] || 0));
+    const order  = [...[...onNow].sort((a, b) => (dayTimes[b] || 0) - (dayTimes[a] || 0)), ...bench];
+    const n = order.length;
+    if (n === 0) return;
+    const newRots = Array.from({ length: remaining }, (_, i) => ({
+      id: currentRot + i + 1,
+      onCourt: [...new Set(Array.from({ length: Math.min(ON, n) }, (_, j) => order[(i * 2 + j) % n]))],
+    }));
+    setCurRotations(prev => [...prev.slice(0, currentRot), ...newRots]);
+  }
+  function trimGame(gi) {
+    setGames(prev => prev.map((g, i) => i === gi ? { ...g, log: trimLog(g.log, gameMs, Date.now()) } : g));
+    setConfirmTrim(null);
   }
   function resetGame() {
     updateCurGame(g => ({ ...g, log: [] }));
@@ -620,12 +685,20 @@ export default function App() {
                 )}
               </div>
 
-              {status === "paused" && (
-                <div style={{ background:"#fbbf2415", border:"1px solid #fbbf2450", borderRadius:10,
-                              padding:"8px 14px", marginBottom:12, fontSize:13, color:"#fbbf24", fontWeight:600 }}>
-                  ⏸ Clock stopped — court time isn't counting. Tap ▶ to resume.
-                </div>
-              )}
+              {status === "paused" && (() => {
+                const lastEv = curGame.log[curGame.log.length - 1];
+                const auto = lastEv?.type === "pause" ? lastEv.auto : null;
+                return (
+                  <div style={{ background:"#fbbf2415", border:"1px solid #fbbf2450", borderRadius:10,
+                                padding:"8px 14px", marginBottom:12, fontSize:13, color:"#fbbf24", fontWeight:600 }}>
+                    {auto === "full"
+                      ? "🏁 Full time — clock stopped automatically. End the game below, or tap ▶ if play is still going."
+                      : auto === "break"
+                        ? "⏸ Break — clock stopped automatically. Tap ▶ when play restarts."
+                        : "⏸ Clock stopped — court time isn't counting. Tap ▶ to resume."}
+                  </div>
+                );
+              })()}
 
               {rot.on.length > 0 && (
                 <div style={{ marginBottom:12 }}>
@@ -845,7 +918,10 @@ export default function App() {
 
           <div style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>Player Names</div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
-            Names are saved on this phone only — never published anywhere
+            Names are saved on this phone only — never published anywhere.
+            Each box is a fixed slot &amp; colour: renaming relabels that girl everywhere,
+            <b> including minutes already played</b> — to change who plays when, edit the
+            rotations below instead.
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:24 }}>
             {ROSTER.map(p => (
@@ -893,18 +969,24 @@ export default function App() {
 
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
             <div style={{ fontSize:15, fontWeight:700 }}>{curGame.label} Rotations</div>
-            <button onClick={autoBalance} disabled={gameStarted} style={{
-              fontSize:13, padding:"6px 16px", fontWeight:700, border:"none",
-              background: gameStarted ? "#ffffff08" : "#f97316",
-              color: gameStarted ? "#444" : "#000",
-              borderRadius:8, cursor: gameStarted ? "default" : "pointer" }}>
-              ✨ Auto-balance
-            </button>
+            {(() => {
+              const canBalance = status !== "ended" &&
+                (!gameStarted || currentRot < curGame.rotations.length - 1);
+              return (
+                <button onClick={autoBalance} disabled={!canBalance} style={{
+                  fontSize:13, padding:"6px 16px", fontWeight:700, border:"none",
+                  background: !canBalance ? "#ffffff08" : "#f97316",
+                  color: !canBalance ? "#444" : "#000",
+                  borderRadius:8, cursor: !canBalance ? "default" : "pointer" }}>
+                  {gameStarted ? "✨ Re-balance rest" : "✨ Auto-balance"}
+                </button>
+              );
+            })()}
           </div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
             Every sub swaps 2 girls, so each girl plays a few rotations in a row.
             {gameStarted
-              ? " Game underway — tap a player to swap, hold & drag to reorder."
+              ? " Game underway — Re-balance keeps what's been played and rebuilds only the rotations still to come, starting from who's on court now. Tap a player to swap, hold & drag to reorder."
               : " Auto-balance rebuilds the lineup from everyone's minutes so far today."}
             {" "}Everything saves automatically.
           </div>
@@ -1094,25 +1176,51 @@ export default function App() {
           </div>
 
           {/* Rotation log per game */}
-          {games.map((g, gi) => analyses[gi].segments.length > 0 && (
-            <div key={g.id} style={{ marginTop:12, padding:14, background:"#ffffff06",
-                          borderRadius:12, border:"1px solid #ffffff0a" }}>
-              <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:8 }}>
-                <span style={{ color:"#888", fontWeight:700 }}>{g.label} rotation log</span>
-                <span style={{ color:"#666" }}>
-                  {fmt(analyses[gi].segments.reduce((s, seg) => s + seg.dur, 0))} total
-                  {gi === curIdx && status !== "ended" ? " · live" : ""}
-                </span>
-              </div>
-              {analyses[gi].segments.map((seg, i) => (
-                <div key={i} style={{ display:"flex", justifyContent:"space-between",
-                                      fontSize:12, padding:"4px 0", borderBottom:"1px solid #ffffff08" }}>
-                  <span style={{ color:"#666" }}>Rot {seg.rotIndex+1}</span>
-                  <span style={{ color:"#aaa" }}>{fmt(seg.dur)}</span>
+          {games.map((g, gi) => {
+            if (analyses[gi].segments.length === 0) return null;
+            const gTotal = analyses[gi].segments.reduce((s, seg) => s + seg.dur, 0);
+            const overrun = gTotal - gameMs;
+            return (
+              <div key={g.id} style={{ marginTop:12, padding:14, background:"#ffffff06",
+                            borderRadius:12, border:"1px solid #ffffff0a" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:8 }}>
+                  <span style={{ color:"#888", fontWeight:700 }}>{g.label} rotation log</span>
+                  <span style={{ color: overrun > 5000 ? "#ef4444" : "#666" }}>
+                    {fmt(gTotal)} total
+                    {gi === curIdx && status !== "ended" ? " · live" : ""}
+                  </span>
                 </div>
-              ))}
-            </div>
-          ))}
+                {overrun > 5000 && (
+                  confirmTrim === gi ? (
+                    <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+                      <button onClick={() => setConfirmTrim(null)} style={{
+                        flex:1, padding:"8px 0", background:"#ffffff10", color:"#aaa",
+                        border:"1px solid #333", borderRadius:8, fontSize:12, cursor:"pointer" }}>Cancel</button>
+                      <button onClick={() => trimGame(gi)} style={{
+                        flex:2, padding:"8px 0", background:"#ef4444", color:"#fff",
+                        border:"none", borderRadius:8, fontSize:12, fontWeight:700, cursor:"pointer" }}>
+                        Yes, end {g.label} at {fmt(gameMs)}
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmTrim(gi)} style={{
+                      width:"100%", padding:"8px 0", marginBottom:8,
+                      background:"#ef444415", color:"#ef4444",
+                      border:"1px solid #ef444450", borderRadius:8, fontSize:12, fontWeight:700, cursor:"pointer" }}>
+                      ✂ Trim over-run — clock ran {fmt(overrun)} past full time
+                    </button>
+                  )
+                )}
+                {analyses[gi].segments.map((seg, i) => (
+                  <div key={i} style={{ display:"flex", justifyContent:"space-between",
+                                        fontSize:12, padding:"4px 0", borderBottom:"1px solid #ffffff08" }}>
+                    <span style={{ color:"#666" }}>Rot {seg.rotIndex+1}</span>
+                    <span style={{ color:"#aaa" }}>{fmt(seg.dur)}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
         </div>
       )}
 

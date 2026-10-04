@@ -21,15 +21,24 @@ next game — across a day the spread stays within a few minutes.
   number she's guarding (🛡 #7). When girls sub off, the OFF chips and the
   next-sub preview show which numbers are freed up so you can reassign
   on the spot.
-- **⏸ Pause** — tap the yellow pause button at half time or any stoppage.
-  The clock and court-time tracking freeze until you tap ▶ resume. Making
-  a sub while paused automatically resumes the clock.
+- **⏸ Pause** — tap the yellow pause button at any stoppage. The clock and
+  court-time tracking freeze until you tap ▶ resume. Making a sub while
+  paused automatically resumes the clock. **Half time and full time pause
+  themselves**: when the game clock crosses a break or the full game
+  length the clock stops automatically, and the banner says whether to
+  tap ▶ for the restart or ■ to end the game — a forgotten clock can no
+  longer inflate court times. If one still over-runs, a **✂ Trim
+  over-run** button on that game's rotation log (Time tab) retroactively
+  ends it at full time and removes the excess from everyone's stats.
 - **■ End game** at the final whistle, then **▶ Set up the next game** —
   the new lineup is auto-balanced from everyone's minutes so far that day.
 - **⚙ Setup tab** — the Game Format card (halves × half length, sub
   interval, squad size, players on court), player names, Away/Injured
   availability, and the current game's rotations (tap to swap, hold & drag
-  to reorder, ✨ Auto-balance before tip-off).
+  to reorder, ✨ Auto-balance before tip-off). Once a game is underway the
+  button becomes **Re-balance rest**: played rotations and recorded
+  minutes stay as they are, and only the rotations still to come are
+  rebuilt, starting from who's on court now.
 - **⏱ Time tab** — court time per player, toggled between **this game**
   and the **whole day**, each against its fair-share target, plus a
   rotation log for every game.
