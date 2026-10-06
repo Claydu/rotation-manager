@@ -7,10 +7,13 @@ is known.
 
 **The rotation pattern:** every sub swaps 2 girls. The on-court five is a
 window that slides 2 spots around the squad each rotation, so each girl
-plays blocks of consecutive rotations rather than bitsy shifts. 5-of-7
-never divides evenly inside one game, so the girls who are behind on
-minutes for the day are automatically given the higher-minute spots in the
-next game — across a day the spread stays within a few minutes.
+plays blocks of consecutive rotations rather than bitsy shifts. Equal time
+is aimed at **within each game only** — every game starts fresh and
+nothing carries over between games. 5-of-7 never divides perfectly inside
+one game, so which girls land on the slightly longer end rotates from game
+to game. Girls marked **😴 Tired** still play but get the lighter
+rotations that day — fatigue management is the coach's call, not a debt
+the balancer repays later.
 
 ## Using it on game day
 
@@ -31,11 +34,12 @@ next game — across a day the spread stays within a few minutes.
   over-run** button on that game's rotation log (Time tab) retroactively
   ends it at full time and removes the excess from everyone's stats.
 - **■ End game** at the final whistle, then **▶ Set up the next game** —
-  the new lineup is auto-balanced from everyone's minutes so far that day.
+  a fresh auto-balanced lineup aiming for equal time in that game.
 - **⚙ Setup tab** — the Game Format card (halves × half length, sub
-  interval, squad size, players on court), player names, Away/Injured
-  availability, and the current game's rotations (tap to swap, hold & drag
-  to reorder, ✨ Auto-balance before tip-off). Once a game is underway the
+  interval, squad size, players on court), player names, availability
+  (Away/Injured are removed from rotations; 😴 Tired plays the lighter
+  ones), and the current game's rotations (tap to swap, hold & drag to
+  reorder, ✨ Auto-balance before tip-off). Once a game is underway the
   button becomes **Re-balance rest**: played rotations and recorded
   minutes stay as they are, and only the rotations still to come are
   rebuilt, starting from who's on court now.

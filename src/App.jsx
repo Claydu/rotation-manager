@@ -62,11 +62,14 @@ function buildSequence(rotations, allPlayers) {
 // Build a game's rotations as a sliding window over a cycle of players:
 // rotation i puts positions (2i … 2i+ON-1 mod n) on court, so every sub
 // swaps at most 2 girls and each girl plays consecutive rotations in
-// blocks. Positions don't get perfectly equal time within one game
-// (5-of-7 never divides evenly), so the girls who are behind on day
-// minutes are assigned to the highest-coverage positions, and the
-// roster is offset per game so ties rotate who starts.
-function generateRotations(cumTimes, players, gameIndex, onCourtN, nRots) {
+// blocks. Equal time is aimed at WITHIN this game only — nothing carries
+// across games: a lighter day for a tired girl is the coach's call, not
+// a debt the balancer repays later. Positions don't get perfectly equal
+// time in one game (5-of-7 never divides evenly), so girls behind on
+// THIS game's minutes get the highest-coverage positions, girls marked
+// tired get the lowest, and the roster is offset per game so ties rotate
+// who starts.
+function generateRotations(players, gameIndex, onCourtN, nRots, gameTimes = {}, tired = []) {
   const n = players.length;
   if (n === 0) return Array.from({ length: nRots }, (_, i) => ({ id: i + 1, onCourt: [] }));
   const ON = Math.min(onCourtN, n);
@@ -81,7 +84,9 @@ function generateRotations(cumTimes, players, gameIndex, onCourtN, nRots) {
 
   const offset  = (gameIndex * 2) % n;
   const rotated = players.map((_, i) => players[(i + offset) % n]);
-  const sorted  = [...rotated].sort((a, b) => (cumTimes[a] || 0) - (cumTimes[b] || 0));
+  const sorted  = [...rotated].sort((a, b) =>
+    (tired.includes(a) - tired.includes(b)) ||
+    ((gameTimes[a] || 0) - (gameTimes[b] || 0)));
   const posOrder = coverage.map((c, pos) => [c, pos])
     .sort((a, b) => b[0] - a[0] || a[1] - b[1]).map(([, pos]) => pos);
   const atPos = Array(n);
@@ -187,11 +192,12 @@ export default function App() {
   // Season + tournament state — a list of games; the last one is live.
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [games,    setGames]    = useState(() => [makeGame(0,
-    generateRotations({}, PLAYERS.slice(0, DEFAULT_SETTINGS.squadSize), 0,
+    generateRotations(PLAYERS.slice(0, DEFAULT_SETTINGS.squadSize), 0,
                       DEFAULT_SETTINGS.onCourt, rotsFor(DEFAULT_SETTINGS)), [])]);
   const [names,    setNames]    = useState({});
   const [absent,   setAbsent]   = useState([]);
   const [injured,  setInjured]  = useState([]);
+  const [tired,    setTired]    = useState([]);   // plays, but on the lighter rotations
   const [loaded,   setLoaded]   = useState(false);
 
   // UI
@@ -254,6 +260,7 @@ export default function App() {
       setGames(saved.games);
       if (saved.absent)      setAbsent(saved.absent);
       if (saved.injured)     setInjured(saved.injured);
+      if (saved.tired)       setTired(saved.tired);
       if (saved.settings)    setSettings({ ...DEFAULT_SETTINGS, ...saved.settings });
       if (saved.playerNotes) setPlayerNotes(saved.playerNotes);
     }
@@ -265,8 +272,8 @@ export default function App() {
   // ── Auto-save everything on every change ──────────────────────
   useEffect(() => {
     if (!loaded) return;
-    persist(KEY_TOURNEY, { games, absent, injured, settings, playerNotes });
-  }, [loaded, games, absent, injured, settings, playerNotes]);
+    persist(KEY_TOURNEY, { games, absent, injured, tired, settings, playerNotes });
+  }, [loaded, games, absent, injured, tired, settings, playerNotes]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -372,13 +379,13 @@ export default function App() {
     if (gameStarted) return;   // live game keeps its rotations
     const roster = PLAYERS.slice(0, next.squadSize);
     const act    = roster.filter(p => !unavailable.includes(p));
-    setCurRotations(generateRotations(dayTimes, act, curIdx, next.onCourt, rotsFor(next)));
+    setCurRotations(generateRotations(act, curIdx, next.onCourt, rotsFor(next), {}, tired));
   }
 
   // ── Tournament controls ───────────────────────────────────────
   function startNextGame() {
     setGames(prev => [...prev, makeGame(prev.length,
-      generateRotations(dayTimes, activePlayers, prev.length, ON, rotsFor(settings)), unavailable)]);
+      generateRotations(activePlayers, prev.length, ON, rotsFor(settings), {}, tired), unavailable)]);
     setView("game");
   }
   function backToPrevGame() {
@@ -388,20 +395,23 @@ export default function App() {
   }
   function autoBalance() {
     if (!gameStarted) {
-      setCurRotations(generateRotations(dayTimes, activePlayers, curIdx, ON, rotsFor(settings)));
+      setCurRotations(generateRotations(activePlayers, curIdx, ON, rotsFor(settings), {}, tired));
       return;
     }
     // Mid-game: keep the rotations already played (recorded minutes stay
-    // untouched) and rebuild from the current one onward. The new window
-    // order starts with who's on court now — highest day minutes first,
-    // so they come off soonest — then the bench, lowest minutes first.
+    // untouched) and rebuild from the current one onward, balancing THIS
+    // game's minutes only. The new window order starts with who's on
+    // court now — tired girls and highest game minutes come off soonest —
+    // then the bench, tired girls and highest minutes coming on last.
     const nRots = curGame.rotations.length;
     const remaining = nRots - currentRot;
     if (remaining <= 1 || status === "ended") return;
+    const isTired = p => tired.includes(p) ? 1 : 0;
     const onNow  = (effectiveRots[currentRot]?.onCourt || []).filter(p => activePlayers.includes(p));
     const bench  = activePlayers.filter(p => !onNow.includes(p))
-      .sort((a, b) => (dayTimes[a] || 0) - (dayTimes[b] || 0));
-    const order  = [...[...onNow].sort((a, b) => (dayTimes[b] || 0) - (dayTimes[a] || 0)), ...bench];
+      .sort((a, b) => (isTired(a) - isTired(b)) || ((game.times[a] || 0) - (game.times[b] || 0)));
+    const order  = [...[...onNow].sort((a, b) =>
+      (isTired(b) - isTired(a)) || ((game.times[b] || 0) - (game.times[a] || 0))), ...bench];
     const n = order.length;
     if (n === 0) return;
     const newRots = Array.from({ length: remaining }, (_, i) => ({
@@ -419,7 +429,7 @@ export default function App() {
     setConfirmReset(null);
   }
   function resetDay() {
-    setGames([makeGame(0, generateRotations({}, activePlayers, 0, ON, rotsFor(settings)), unavailable)]);
+    setGames([makeGame(0, generateRotations(activePlayers, 0, ON, rotsFor(settings), {}, tired), unavailable)]);
     setPlayerNotes({});
     setConfirmReset(null);
   }
@@ -492,10 +502,17 @@ export default function App() {
   function toggleAbsent(p) {
     setAbsent(prev  => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]);
     setInjured(prev => prev.filter(x => x !== p));
+    setTired(prev   => prev.filter(x => x !== p));
   }
   function toggleInjured(p) {
     setInjured(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]);
     setAbsent(prev  => prev.filter(x => x !== p));
+    setTired(prev   => prev.filter(x => x !== p));
+  }
+  function toggleTired(p) {
+    setTired(prev   => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]);
+    setAbsent(prev  => prev.filter(x => x !== p));
+    setInjured(prev => prev.filter(x => x !== p));
   }
 
   // ── Drag to reorder players within a rotation row ─────────────
@@ -834,7 +851,7 @@ export default function App() {
                 ▶ Set up Game {games.length + 1}
               </button>
               <div style={{ fontSize:11, color:"#666", marginTop:8 }}>
-                Lineup is auto-balanced from everyone's minutes so far — tweak it in ⚙ Setup before tip-off.
+                Next game starts fresh — equal time for everyone again. Mark anyone 😴 Tired in ⚙ Setup and she'll get the lighter rotations.
               </div>
               <button onClick={shareExport} style={{
                 width:"100%", marginTop:10, padding:"11px 0",
@@ -882,11 +899,12 @@ export default function App() {
             )
           )}
 
-          {(absent.length > 0 || injured.length > 0) && (
+          {(absent.length > 0 || injured.length > 0 || tired.length > 0) && (
             <div style={{ marginTop:16, padding:12, background:"#ffffff06",
                           borderRadius:10, border:"1px solid #ffffff0a" }}>
               {absent.length > 0  && <div style={{ color:"#888",   fontSize:12 }}>Absent: {absent.map(name).join(", ")}</div>}
               {injured.length > 0 && <div style={{ color:"#fbbf24",fontSize:12, marginTop:4 }}>⚠ Injured: {injured.map(name).join(", ")}</div>}
+              {tired.length > 0   && <div style={{ color:"#60a5fa",fontSize:12, marginTop:4 }}>😴 Tired (lighter rotations): {tired.map(name).join(", ")}</div>}
             </div>
           )}
         </div>
@@ -937,19 +955,21 @@ export default function App() {
 
           <div style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>Player Availability</div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
-            Mark absent or injured — removed from all rotations automatically
+            Away/Injured are removed from all rotations. Tired still plays —
+            auto-balance just gives her the lighter rotations today.
           </div>
           <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:24 }}>
             {ROSTER.map(p => {
               const isAbsent  = absent.includes(p);
               const isInjured = injured.includes(p);
+              const isTired   = tired.includes(p);
+              const accent    = isAbsent?"#ef4444":isInjured?"#fbbf24":isTired?"#60a5fa":playerColor(p);
               return (
                 <div key={p} style={{
-                  background: isAbsent?"#ef444420":isInjured?"#fbbf2420":playerColor(p)+"20",
-                  border:`1.5px solid ${isAbsent?"#ef4444":isInjured?"#fbbf24":playerColor(p)}`,
+                  background: accent+"20",
+                  border:`1.5px solid ${accent}`,
                   borderRadius:12, padding:"8px 12px" }}>
-                  <div style={{ fontWeight:700, fontSize:14,
-                                color:isAbsent?"#ef4444":isInjured?"#fbbf24":playerColor(p) }}>{name(p)}</div>
+                  <div style={{ fontWeight:700, fontSize:14, color:accent }}>{name(p)}</div>
                   <div style={{ display:"flex", gap:4, marginTop:4 }}>
                     <button onClick={() => toggleAbsent(p)} style={{
                       fontSize:10, padding:"2px 6px",
@@ -961,6 +981,11 @@ export default function App() {
                       background:isInjured?"#fbbf24":"#ffffff15",
                       color:isInjured?"#000":"#888",
                       border:"none", borderRadius:4, cursor:"pointer" }}>⚠ Inj</button>
+                    <button onClick={() => toggleTired(p)} style={{
+                      fontSize:10, padding:"2px 6px",
+                      background:isTired?"#60a5fa":"#ffffff15",
+                      color:isTired?"#000":"#888",
+                      border:"none", borderRadius:4, cursor:"pointer" }}>😴 Tired</button>
                   </div>
                 </div>
               );
@@ -987,7 +1012,7 @@ export default function App() {
             Every sub swaps 2 girls, so each girl plays a few rotations in a row.
             {gameStarted
               ? " Game underway — Re-balance keeps what's been played and rebuilds only the rotations still to come, starting from who's on court now. Tap a player to swap, hold & drag to reorder."
-              : " Auto-balance rebuilds the lineup from everyone's minutes so far today."}
+              : " Auto-balance shares this game's time evenly (girls marked Tired get the lighter rotations). Each game starts fresh — nothing carries over."}
             {" "}Everything saves automatically.
           </div>
 
@@ -1123,6 +1148,7 @@ export default function App() {
             const isOver   = ms > scopeTarget * 1.15;
             const isAbsent  = absent.includes(p);
             const isInjured = injured.includes(p);
+            const isTired   = tired.includes(p);
             return (
               <div key={p} style={{ marginBottom:14, opacity:isAbsent?0.4:1 }}>
                 <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
@@ -1130,6 +1156,7 @@ export default function App() {
                     <span style={{ fontWeight:700, fontSize:15, color:playerColor(p) }}>{name(p)}</span>
                     {isInjured && <span style={{ fontSize:10, background:"#fbbf2420", color:"#fbbf24", borderRadius:4, padding:"1px 5px" }}>⚠ INJ</span>}
                     {isAbsent  && <span style={{ fontSize:10, background:"#ef444420", color:"#ef4444", borderRadius:4, padding:"1px 5px" }}>AWAY</span>}
+                    {isTired   && <span style={{ fontSize:10, background:"#60a5fa20", color:"#60a5fa", borderRadius:4, padding:"1px 5px" }}>😴 TIRED</span>}
                     <button onClick={() => openPNote(p)} style={{
                       background:"transparent", border:"none", cursor:"pointer", padding:"0 2px",
                       fontSize:13, opacity:(playerNotes[p]||"").trim() ? 1 : 0.35 }}>📝</button>
