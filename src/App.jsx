@@ -73,16 +73,23 @@ function generateRotations(players, gameIndex, onCourtN, nRots, gameTimes = {}, 
   const n = players.length;
   if (n === 0) return Array.from({ length: nRots }, (_, i) => ({ id: i + 1, onCourt: [] }));
   const ON = Math.min(onCourtN, n);
+  // Slide by 2 so subs swap a pair — but with a single bench spot a sub
+  // can only ever be 1-for-1, and sliding 2 around an even cycle skips
+  // half the positions (half the girls would never rest). Slide 1 then.
+  const step = Math.min(2, Math.max(n - ON, 1));
 
   const coverage = Array(n).fill(0);
   const windows  = [];
   for (let i = 0; i < nRots; i++) {
-    const w = Array.from({ length: ON }, (_, j) => (i * 2 + j) % n);
+    const w = Array.from({ length: ON }, (_, j) => (i * step + j) % n);
     windows.push(w);
     w.forEach(pos => { coverage[pos]++; });
   }
 
-  const offset  = (gameIndex * 2) % n;
+  // Shift the roster one spot per game so, when times are tied (every
+  // fresh game), a different girl starts — and whoever lands the longer
+  // end of an uneven split rotates week to week.
+  const offset  = gameIndex % n;
   const rotated = players.map((_, i) => players[(i + offset) % n]);
   const sorted  = [...rotated].sort((a, b) =>
     (tired.includes(a) - tired.includes(b)) ||
@@ -414,9 +421,10 @@ export default function App() {
       (isTired(b) - isTired(a)) || ((game.times[b] || 0) - (game.times[a] || 0))), ...bench];
     const n = order.length;
     if (n === 0) return;
+    const step = Math.min(2, Math.max(n - ON, 1)); // 1-for-1 subs when only one girl rests
     const newRots = Array.from({ length: remaining }, (_, i) => ({
       id: currentRot + i + 1,
-      onCourt: [...new Set(Array.from({ length: Math.min(ON, n) }, (_, j) => order[(i * 2 + j) % n]))],
+      onCourt: [...new Set(Array.from({ length: Math.min(ON, n) }, (_, j) => order[(i * step + j) % n]))],
     }));
     setCurRotations(prev => [...prev.slice(0, currentRot), ...newRots]);
   }
@@ -1009,7 +1017,7 @@ export default function App() {
             })()}
           </div>
           <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
-            Every sub swaps 2 girls, so each girl plays a few rotations in a row.
+            Every sub swaps a pair of girls (1-for-1 when only one is on the bench), so each girl plays a few rotations in a row.
             {gameStarted
               ? " Game underway — Re-balance keeps what's been played and rebuilds only the rotations still to come, starting from who's on court now. Tap a player to swap, hold & drag to reorder."
               : " Auto-balance shares this game's time evenly (girls marked Tired get the lighter rotations). Each game starts fresh — nothing carries over."}
