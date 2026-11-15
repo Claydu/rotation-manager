@@ -26,20 +26,22 @@ the balancer repays later.
   on the spot.
 - **⏸ Pause** — tap the yellow pause button at any stoppage. The clock and
   court-time tracking freeze until you tap ▶ resume. Making a sub while
-  paused automatically resumes the clock. **Half time and full time pause
-  themselves**: when the game clock crosses a break or the full game
-  length the clock stops automatically, and the banner says whether to
-  tap ▶ for the restart or ■ to end the game — a forgotten clock can no
-  longer inflate court times. If one still over-runs, a **✂ Trim
-  over-run** button on that game's rotation log (Time tab) retroactively
-  ends it at full time and removes the excess from everyone's stats.
+  paused automatically resumes the clock. **Half time pauses itself and
+  full time ends the game itself**: breaks stop the clock with a "tap ▶
+  when play restarts" banner, and at the full game length the game ends
+  automatically — undo is one tap if play is somehow still going. A
+  forgotten clock can no longer inflate court times; if one still
+  over-runs, a **✂ Trim over-run** button on that game's rotation log
+  (Time tab) retroactively ends it at full time.
 - **■ End game** at the final whistle, then **▶ Set up the next game** —
   a fresh auto-balanced lineup aiming for equal time in that game.
 - **⚙ Setup tab** — the Game Format card (halves × half length, sub
   interval, squad size, players on court), player names, availability
   (Away/Injured are removed from rotations; 😴 Tired plays the lighter
-  ones), and the current game's rotations (tap to swap, hold & drag to
-  reorder, ✨ Auto-balance before tip-off). Once a game is underway the
+  ones), the **game captain** (wears the Ⓒ, always starts, and the next
+  game hands the badge to the next girl automatically), and the current
+  game's rotations (tap to swap, hold & drag to reorder, ✨ Auto-balance
+  before tip-off). Once a game is underway the
   button becomes **Re-balance rest**: played rotations and recorded
   minutes stay as they are, and only the rotations still to come are
   rebuilt, starting from who's on court now.
