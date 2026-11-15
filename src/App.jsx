@@ -69,7 +69,7 @@ function buildSequence(rotations, allPlayers) {
 // THIS game's minutes get the highest-coverage positions, girls marked
 // tired get the lowest, and the roster is offset per game so ties rotate
 // who starts.
-function generateRotations(players, gameIndex, onCourtN, nRots, gameTimes = {}, tired = []) {
+function generateRotations(players, gameIndex, onCourtN, nRots, gameTimes = {}, tired = [], captain = null) {
   const n = players.length;
   if (n === 0) return Array.from({ length: nRots }, (_, i) => ({ id: i + 1, onCourt: [] }));
   const ON = Math.min(onCourtN, n);
@@ -99,11 +99,26 @@ function generateRotations(players, gameIndex, onCourtN, nRots, gameTimes = {}, 
   const atPos = Array(n);
   posOrder.forEach((pos, j) => { atPos[pos] = sorted[j]; });
 
+  // The captain must start: rotation 1 is positions 0..ON-1, so if she
+  // landed outside it, swap her with the starter whose total rotations
+  // are closest to hers (captain duty outranks a tired flag).
+  if (captain) {
+    const capPos = atPos.indexOf(captain);
+    if (capPos >= ON) {
+      let best = 0, bestDiff = Infinity;
+      for (let pos = 0; pos < ON; pos++) {
+        const d = Math.abs(coverage[pos] - coverage[capPos]);
+        if (d < bestDiff) { bestDiff = d; best = pos; }
+      }
+      [atPos[capPos], atPos[best]] = [atPos[best], atPos[capPos]];
+    }
+  }
+
   return windows.map((w, i) => ({ id: i + 1, onCourt: w.map(pos => atPos[pos]) }));
 }
 
-function makeGame(index, rotations, unavailable) {
-  return { id: `g${index + 1}-${Date.now()}`, label: `Game ${index + 1}`, rotations, log: [], notes: {}, unavailable };
+function makeGame(index, rotations, unavailable, captain = null) {
+  return { id: `g${index + 1}-${Date.now()}`, label: `Game ${index + 1}`, rotations, log: [], notes: {}, unavailable, captain };
 }
 
 // ── Game clock model ─────────────────────────────────────────────
@@ -235,6 +250,7 @@ export default function App() {
   const curIdx        = games.length - 1;
   const curGame       = games[curIdx];
   const notes         = curGame.notes || {};
+  const gameCaptain   = curGame.captain || null;
 
   // Analyze every game. Past games use the availability snapshot from
   // when they were played, so marking a girl away later never rewrites
@@ -302,19 +318,22 @@ export default function App() {
     return () => clearInterval(id);
   }, [status]);
 
-  // ── Semi-automatic half-time / full-time ──────────────────────
-  // When the game clock crosses a break or full time while running, the
-  // clock pauses itself (once per boundary) — the coach taps ▶ to
-  // restart play or ■ to end the game. Stops forgotten clocks from
-  // inflating court times.
+  // ── Automatic half-time / full-time ───────────────────────────
+  // When the game clock crosses a break while running it pauses itself,
+  // and at full time it ENDS the game (once per boundary) — the coach
+  // taps ▶ after the break, and "undo end" if play is somehow still
+  // going. Stops forgotten clocks from inflating court times.
   useEffect(() => {
     if (status !== "running") return;
     const halfMs = settings.halfMin * 60 * 1000;
-    const taken = new Set(curGame.log.filter(e => e.type === "pause" && e.autoAt).map(e => e.autoAt));
+    const taken = new Set(curGame.log
+      .filter(e => (e.type === "pause" || e.type === "end") && e.autoAt)
+      .map(e => e.autoAt));
     for (let k = 1; k <= settings.halves; k++) {
       const b = k * halfMs;
       if (gameElapsed >= b && !taken.has(b)) {
-        addEvent({ type: "pause", autoAt: b, auto: k === settings.halves ? "full" : "break" });
+        if (k === settings.halves) addEvent({ type: "end", autoAt: b });
+        else addEvent({ type: "pause", autoAt: b, auto: "break" });
         break;
       }
     }
@@ -363,7 +382,17 @@ export default function App() {
   function resumeGame() { addEvent({ type: "resume" }); }
   function endGame()    { addEvent({ type: "end" }); }
   function undoEnd() {
-    updateCurGame(g => g.log[g.log.length - 1]?.type === "end" ? { ...g, log: g.log.slice(0, -1) } : g);
+    updateCurGame(g => {
+      const last = g.log[g.log.length - 1];
+      if (last?.type !== "end") return g;
+      // An automatic full-time end becomes a pause (keeping its marker),
+      // so the clock doesn't instantly end itself again on resume.
+      if (last.autoAt) {
+        return { ...g, log: [...g.log.slice(0, -1),
+          { type: "pause", ts: last.ts, autoAt: last.autoAt, auto: "break" }] };
+      }
+      return { ...g, log: g.log.slice(0, -1) };
+    });
   }
   function doSub() {
     if (currentRot >= sequence.length - 1) return;
@@ -386,13 +415,26 @@ export default function App() {
     if (gameStarted) return;   // live game keeps its rotations
     const roster = PLAYERS.slice(0, next.squadSize);
     const act    = roster.filter(p => !unavailable.includes(p));
-    setCurRotations(generateRotations(act, curIdx, next.onCourt, rotsFor(next), {}, tired));
+    setCurRotations(generateRotations(act, curIdx, next.onCourt, rotsFor(next), {}, tired, gameCaptain));
   }
 
   // ── Tournament controls ───────────────────────────────────────
+  // Captaincy rotates: the next game hands the (C) to the next available
+  // girl in roster order. The coach can always re-pick in Setup.
+  function nextCaptainAfter(prev) {
+    if (!prev) return null;
+    const start = PLAYERS.indexOf(prev);
+    if (start === -1) return null;
+    for (let i = 1; i <= ROSTER.length; i++) {
+      const cand = ROSTER[(start + i) % ROSTER.length];
+      if (activePlayers.includes(cand)) return cand;
+    }
+    return null;
+  }
   function startNextGame() {
+    const cap = nextCaptainAfter(gameCaptain);
     setGames(prev => [...prev, makeGame(prev.length,
-      generateRotations(activePlayers, prev.length, ON, rotsFor(settings), {}, tired), unavailable)]);
+      generateRotations(activePlayers, prev.length, ON, rotsFor(settings), {}, tired, cap), unavailable, cap)]);
     setView("game");
   }
   function backToPrevGame() {
@@ -400,9 +442,16 @@ export default function App() {
     if (curGame.log.length > 0 || games.length < 2) return;
     setGames(prev => prev.slice(0, -1));
   }
+  function setCaptain(p) {
+    const next = gameCaptain === p ? null : p;
+    updateCurGame(g => ({ ...g, captain: next }));
+    if (!gameStarted) {
+      setCurRotations(generateRotations(activePlayers, curIdx, ON, rotsFor(settings), {}, tired, next));
+    }
+  }
   function autoBalance() {
     if (!gameStarted) {
-      setCurRotations(generateRotations(activePlayers, curIdx, ON, rotsFor(settings), {}, tired));
+      setCurRotations(generateRotations(activePlayers, curIdx, ON, rotsFor(settings), {}, tired, gameCaptain));
       return;
     }
     // Mid-game: keep the rotations already played (recorded minutes stay
@@ -437,7 +486,8 @@ export default function App() {
     setConfirmReset(null);
   }
   function resetDay() {
-    setGames([makeGame(0, generateRotations(activePlayers, 0, ON, rotsFor(settings), {}, tired), unavailable)]);
+    const cap = nextCaptainAfter(gameCaptain) || gameCaptain;
+    setGames([makeGame(0, generateRotations(activePlayers, 0, ON, rotsFor(settings), {}, tired, cap), unavailable, cap)]);
     setPlayerNotes({});
     setConfirmReset(null);
   }
@@ -483,7 +533,7 @@ export default function App() {
       if (a.segments.length === 0) return;
       const total = a.segments.reduce((s, seg) => s + seg.dur, 0);
       lines.push("", `${g.label} — ${fmt(total)} played, ${a.segments.length} rotation${a.segments.length !== 1 ? "s" : ""}`);
-      ROSTER.forEach(p => { if (a.times[p] > 0) lines.push(`  ${name(p)}  ${fmt(a.times[p])}`); });
+      ROSTER.forEach(p => { if (a.times[p] > 0) lines.push(`  ${name(p)}${g.captain === p ? " (C)" : ""}  ${fmt(a.times[p])}`); });
     });
     lines.push("", `Day totals (target ${fmt(gameTarget * games.length)} each)`);
     ROSTER.forEach(p => lines.push(`  ${name(p)}  ${fmt(dayTimes[p] || 0)}`));
@@ -716,11 +766,9 @@ export default function App() {
                 return (
                   <div style={{ background:"#fbbf2415", border:"1px solid #fbbf2450", borderRadius:10,
                                 padding:"8px 14px", marginBottom:12, fontSize:13, color:"#fbbf24", fontWeight:600 }}>
-                    {auto === "full"
-                      ? "🏁 Full time — clock stopped automatically. End the game below, or tap ▶ if play is still going."
-                      : auto === "break"
-                        ? "⏸ Break — clock stopped automatically. Tap ▶ when play restarts."
-                        : "⏸ Clock stopped — court time isn't counting. Tap ▶ to resume."}
+                    {auto === "break"
+                      ? "⏸ Break — clock stopped automatically. Tap ▶ when play restarts."
+                      : "⏸ Clock stopped — court time isn't counting. Tap ▶ to resume."}
                   </div>
                 );
               })()}
@@ -764,7 +812,7 @@ export default function App() {
                     <button key={p} onClick={() => openNote(p)} style={{
                       background:playerColor(p), color:"#000", border:"none",
                       borderRadius:12, padding:"7px 12px", cursor:"pointer", textAlign:"left" }}>
-                      <div style={{ fontSize:14, fontWeight:800 }}>{name(p)}</div>
+                      <div style={{ fontSize:14, fontWeight:800 }}>{gameCaptain === p ? "Ⓒ " : ""}{name(p)}</div>
                       <div style={{ fontSize:11, fontWeight:700, opacity: notes[p] ? 0.9 : 0.45 }}>
                         {notes[p] ? `🛡 ${fmtNote(notes[p])}` : "＋ matchup"}
                       </div>
@@ -848,9 +896,13 @@ export default function App() {
           {status === "ended" && (
             <div style={{ padding:16, background:"#22d3ee10",
                           border:"1px solid #22d3ee40", borderRadius:12, textAlign:"center" }}>
-              <div style={{ fontSize:15, fontWeight:800, color:"#22d3ee" }}>🏀 {curGame.label} done!</div>
+              <div style={{ fontSize:15, fontWeight:800, color:"#22d3ee" }}>
+                🏀 {curGame.label} done!
+                {curGame.log[curGame.log.length-1]?.autoAt != null && " 🏁 Ended automatically at full time."}
+              </div>
               <div style={{ fontSize:12, color:"#888", marginTop:4 }}>
                 Court times are banked for the day — check the ⏱ Time tab.
+                {curGame.log[curGame.log.length-1]?.autoAt != null && " Still playing? Tap undo below."}
               </div>
               <button onClick={startNextGame} style={{
                 width:"100%", marginTop:14, padding:"14px 0",
@@ -1000,6 +1052,30 @@ export default function App() {
             })}
           </div>
 
+          <div style={{ fontSize:15, fontWeight:700, marginBottom:4 }}>Game Captain</div>
+          <div style={{ fontSize:12, color:"#666", marginBottom:12 }}>
+            One girl wears the Ⓒ each week and always starts the game.
+            {gameStarted
+              ? " Game underway — changing it now only moves the badge."
+              : " Picking her re-deals the lineup so she's in the starting five. The next game passes it to the next girl automatically."}
+          </div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginBottom:24 }}>
+            {ROSTER.map(p => {
+              const isCap    = gameCaptain === p;
+              const disabled = unavailable.includes(p);
+              return (
+                <button key={p} onClick={() => !disabled && setCaptain(p)} style={{
+                  background: isCap ? playerColor(p) : disabled ? "#ffffff06" : playerColor(p)+"20",
+                  color: isCap ? "#000" : disabled ? "#444" : playerColor(p),
+                  border:`1.5px solid ${disabled ? "#333" : playerColor(p)}`,
+                  borderRadius:20, padding:"6px 14px", fontSize:14, fontWeight:800,
+                  cursor: disabled ? "default" : "pointer" }}>
+                  {isCap ? "Ⓒ " : ""}{name(p)}
+                </button>
+              );
+            })}
+          </div>
+
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
             <div style={{ fontSize:15, fontWeight:700 }}>{curGame.label} Rotations</div>
             {(() => {
@@ -1036,6 +1112,12 @@ export default function App() {
                     {effRot.onCourt.length < ON && (
                       <span style={{ marginLeft:8, color:"#ef4444", fontSize:11 }}>
                         ⚠ {effRot.onCourt.length}/{ON} players
+                      </span>
+                    )}
+                    {i === 0 && gameCaptain && !unavailable.includes(gameCaptain)
+                      && !effRot.onCourt.includes(gameCaptain) && (
+                      <span style={{ marginLeft:8, color:"#ef4444", fontSize:11 }}>
+                        ⚠ captain {name(gameCaptain)} should start
                       </span>
                     )}
                   </div>
@@ -1076,7 +1158,7 @@ export default function App() {
                                  position:isDragging?"relative":"static", zIndex:isDragging?5:"auto",
                                  transition:"transform 0.15s, box-shadow 0.15s" }}>
                         {isUnavail && <span style={{ fontSize:10 }}>✕</span>}
-                        {name(p)}
+                        {gameCaptain === p ? "Ⓒ " : ""}{name(p)}
                         {!isUnavail && <span style={{ fontSize:10, opacity:0.6 }}>⇄</span>}
                       </button>
                     );
@@ -1161,7 +1243,7 @@ export default function App() {
               <div key={p} style={{ marginBottom:14, opacity:isAbsent?0.4:1 }}>
                 <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
                   <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    <span style={{ fontWeight:700, fontSize:15, color:playerColor(p) }}>{name(p)}</span>
+                    <span style={{ fontWeight:700, fontSize:15, color:playerColor(p) }}>{gameCaptain === p ? "Ⓒ " : ""}{name(p)}</span>
                     {isInjured && <span style={{ fontSize:10, background:"#fbbf2420", color:"#fbbf24", borderRadius:4, padding:"1px 5px" }}>⚠ INJ</span>}
                     {isAbsent  && <span style={{ fontSize:10, background:"#ef444420", color:"#ef4444", borderRadius:4, padding:"1px 5px" }}>AWAY</span>}
                     {isTired   && <span style={{ fontSize:10, background:"#60a5fa20", color:"#60a5fa", borderRadius:4, padding:"1px 5px" }}>😴 TIRED</span>}
