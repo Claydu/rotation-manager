@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
 function rotsFor(s) { return Math.max(1, Math.ceil((s.halves * s.halfMin) / s.subMin)); }
 
 const KEY_TOURNEY = "u10_tourney_v1";
+const KEY_BACKUP  = "u10_tourney_backup_v1";  // snapshot taken before each reset
 const KEY_NAMES   = "u8_names_v1";   // kept from last season so names carry over
 
 // Storage: localStorage first (survives app/phone restarts), with an
@@ -238,6 +239,7 @@ export default function App() {
   const [shareStatus, setShareStatus] = useState(null); // null | 'shared' | 'copied' | 'error'
   const [confirmReset, setConfirmReset] = useState(null); // null | 'game' | 'day'
   const [confirmTrim,  setConfirmTrim]  = useState(null); // game index pending trim
+  const [dayBackup,    setDayBackup]    = useState(null); // snapshot from before the last reset
   const [now,       setNow]       = useState(Date.now());
   const [dragInfo,  setDragInfo]  = useState(null); // {rotIdx, player} while dragging
   const wakeLockRef = useRef(null);
@@ -293,6 +295,7 @@ export default function App() {
     }
     const savedNames = retrieve(KEY_NAMES);
     if (savedNames) setNames(savedNames);
+    setDayBackup(retrieve(KEY_BACKUP));
     setLoaded(true);
   }, []);
 
@@ -485,14 +488,30 @@ export default function App() {
     setGames(prev => prev.map((g, i) => i === gi ? { ...g, log: trimLog(g.log, gameMs, Date.now()) } : g));
     setConfirmTrim(null);
   }
+  // Before either reset, stash the day so one accidental tap is undoable.
+  function backupDay() {
+    const snapshot = { when: Date.now(), games, playerNotes };
+    persist(KEY_BACKUP, snapshot);
+    setDayBackup(snapshot);
+  }
   function resetGame() {
+    backupDay();
     updateCurGame(g => ({ ...g, log: [] }));
     setConfirmReset(null);
   }
   function resetDay() {
+    backupDay();
     const cap = nextCaptainAfter(gameCaptain) || gameCaptain;
     setGames([makeGame(0, generateRotations(activePlayers, 0, ON, rotsFor(settings), {}, tired, cap), unavailable, cap)]);
     setPlayerNotes({});
+    setConfirmReset(null);
+  }
+  function restoreDay() {
+    if (!dayBackup?.games?.length) return;
+    setGames(dayBackup.games);
+    setPlayerNotes(dayBackup.playerNotes || {});
+    forget(KEY_BACKUP);
+    setDayBackup(null);
     setConfirmReset(null);
   }
 
@@ -1212,6 +1231,18 @@ export default function App() {
                 ↺ Reset whole day (games, times &amp; notes — names and format are kept)
               </button>
             )}
+            {dayBackup?.games?.length > 0 && (
+              <button onClick={restoreDay} style={{
+                width:"100%", marginTop:8, padding:"10px 0",
+                background:"#22d3ee15", color:"#22d3ee",
+                border:"1px solid #22d3ee50", borderRadius:10, fontSize:13, fontWeight:700, cursor:"pointer" }}>
+                ⏮ Undo reset — bring back the day from {new Date(dayBackup.when).toLocaleDateString(undefined, { day:"numeric", month:"short" })}
+              </button>
+            )}
+            <div style={{ fontSize:11, color:"#555", marginTop:8 }}>
+              A reset keeps one backup, so the last reset can always be undone.
+              Export the day summary first if you want the stats kept for good.
+            </div>
           </div>
         </div>
       )}
