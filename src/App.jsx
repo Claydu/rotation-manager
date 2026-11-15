@@ -191,6 +191,10 @@ function fmt(ms) {
 }
 function fmtNote(n) { return /^\d+$/.test(n) ? `#${n}` : n; }
 
+// Build stamp (injected by vite.config.js) — shown in the header so a
+// coach can tell at a glance whether the phone has the latest version.
+const BUILD = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "dev";
+
 const COLORS = ["#f97316","#22d3ee","#a78bfa","#34d399","#fb7185","#fbbf24","#60a5fa","#f472b6"];
 function playerColor(p) { return COLORS[PLAYERS.indexOf(p) % COLORS.length]; }
 
@@ -653,8 +657,11 @@ export default function App() {
       <div style={{ background:"linear-gradient(135deg,#1a1a2e,#16213e)",
                     borderBottom:"1px solid #ffffff15", padding:"16px 20px 12px",
                     position:"sticky", top:0, zIndex:10 }}>
-        <div style={{ fontSize:11, letterSpacing:3, color:"#f97316", fontWeight:700, textTransform:"uppercase" }}>
-          U10 Basketball
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+          <div style={{ fontSize:11, letterSpacing:3, color:"#f97316", fontWeight:700, textTransform:"uppercase" }}>
+            U10 Basketball
+          </div>
+          <div style={{ fontSize:10, color:"#555" }}>updated {BUILD}</div>
         </div>
         <div style={{ fontSize:22, fontWeight:800, marginTop:2, display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
           Rotation Manager
